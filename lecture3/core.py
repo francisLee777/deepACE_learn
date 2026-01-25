@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 
 
@@ -16,7 +18,7 @@ class Function:
             output.creator = self  # 保存创建函数，这样在反向传播时，可以沿着 output.creator 反查梯度来源
 
         self.input_variable = input_variable  # 保存输入变量，用于反向传播时计算梯度
-        self.output_variable = output_variable_list  # 保存输出变量，用于反向传播时计算梯度
+        self.output_variable = [weakref.ref(out) for out in output_variable_list]  # 保存输出变量，用于反向传播时计算梯度
         # 如果返回值列表中只有一个元素，则返回第 1 个元素。
         # 这种处理方式的优点是符合人类直觉，但缺点是返回值类型不固定，需要调用者根据实际情况决定如何取值，y, = Square(x) 单输出时加逗号解包  y1, y2 = split(x) # 多输出时正常解包
         # 作为教学项目比较合理，但工业级框架一般固定为返回一个 tuple/tensor, 这样可以统一处理单输出和多输出的情况
@@ -264,7 +266,7 @@ class Variable:
     def __abs__(self):
         return abs(self)
 
-    def backward(self):
+    def backward(self, retain_grad=False):
         if self.grad is None:
             self.grad = Variable(np.ones_like(self.value))
 
@@ -291,7 +293,7 @@ class Variable:
         # 按照后序遍历的逆序（从输出到输入）处理每个函数
         for f in funcs[::-1]:
             # 计算当前函数的梯度
-            output_grads = [temp_y.grad for temp_y in f.output_variable]  # 元素类型是 Variable 类型
+            output_grads = [temp_y().grad for temp_y in f.output_variable]  # 元素类型是 Variable 类型
             grads = f.backward(*output_grads)  # 计算结果是 Variable 类型
             if not isinstance(grads, tuple):
                 grads = (grads,)
@@ -303,6 +305,11 @@ class Variable:
                 else:
                     # 不能写成 temp_x.grad += grads[i]，否则在 Python 的语义中，就地修改原有对象，如果其他节点仍然在依赖这个 temp_x.grad, 会被污染数据。
                     temp_x.grad = temp_x.grad + grads[i]
+
+            # 如果不需要保留梯度，则把中间变量的梯度都置为None
+            if not retain_grad:
+                for temp_y in f.output_variable:
+                    temp_y().grad = None  # 弱引用使用 ()
 
 
 if __name__ == '__main__':
@@ -317,7 +324,6 @@ if __name__ == '__main__':
     y = as_variable(as_array(3))
     z = x + y
     print(f"x + y = {z.value}")
-    z.backward()
     print(f"梯度: ∂z/∂x = {x.grad.value}, ∂z/∂y = {y.grad.value}")
 
     # 测试反向加法运算符

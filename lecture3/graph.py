@@ -10,10 +10,10 @@ def _dot_var(v, verbose=False):
     dot_var = '{} [label="{}", color=orange, style=filled]\n'
 
     name = '' if v.name is None else v.name
-    if verbose and v.input_data is not None:
+    if verbose and v.value is not None:
         if v.name is not None:
             name += ': '
-        name += str(v.input_data) + ' '
+        name += str(v.value) + ' '
 
     return dot_var.format(id(v), name)
 
@@ -28,7 +28,7 @@ def _dot_func(f):
     for x in f.input_variable:
         ret += dot_edge.format(id(x), id(f))
     for y in f.output_variable:
-        ret += dot_edge.format(id(f), id(y))
+        ret += dot_edge.format(id(f), id(y()))
     return ret
 
 
@@ -79,11 +79,17 @@ def goldstein(x, y):
     return z
 
 
+def goldstein(x, y):
+    z = (1 + (x + y + 1) ** 2 * (19 - 14 * x + 3 * x ** 2 - 14 * y + 6 * x * y + 3 * y ** 2)) * \
+        (30 + (2 * x - 3 * y) ** 2 * (18 - 32 * x + 12 * x ** 2 + 48 * y - 36 * x * y + 27 * y ** 2))
+    return z
+
+
 if __name__ == '__main__':
-    x = Variable(np.array(1.0), name="x")
-    y = Variable(np.array(1.0), name="y")
+    x = Variable(np.array(1.0), "x")
+    y = Variable(np.array(1.0), "y")
     z = goldstein(x, y)
     z.name = 'z'
-    z.backward()
+    z.backward(retain_grad=True)
     print(z.grad)
     plot_dot_graph(z, verbose=True, to_file='goldstein.png')
