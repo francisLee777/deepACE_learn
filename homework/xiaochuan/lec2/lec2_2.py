@@ -101,9 +101,9 @@ class Variable:
 
 # 定义一个函数基类
 class Function:
-    def __call__(self, *input_variable: Variable):
-        input_variable = [as_variable(x) for x in input_variable]
-        xs = [x.data for x in input_variable]
+    def __call__(self, *inputs: Variable):
+        inputs = [as_variable(x) for x in inputs]
+        xs = [x.data for x in inputs]
         # inputs = [as_variable(x) for x in input_variable]
         # xs=[x.data for x in inputs]
 
@@ -115,7 +115,7 @@ class Function:
         output_variable_list = [Variable(as_array(y)) for y in ys]
         for output in output_variable_list:
             output.func = self
-        self.input_variable = input_variable
+        self.input_variable = inputs
         self.output_variable = [weakref.ref(out) for out in output_variable_list]
         return output_variable_list if len(output_variable_list) > 1 else output_variable_list[0]
 
@@ -225,7 +225,7 @@ class Div(Function):
 
     def backward(self, input_y):
         (x1, x2) = self.input_variable
-        # return input_y/x2.data,-input_y*x1.data*x2.data**(-2)  除法测试这种会报错
+        # return input_y / x2.data, -input_y * x1.data * x2.data ** (-2)  # 除法测试这种会报错
         return input_y / x2.data, -input_y * x1.data / x2.data ** (2)
 
 
