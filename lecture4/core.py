@@ -221,7 +221,7 @@ class Exp(Function):
 
     def backward(self, input_dy: Variable):
         (out_dy,) = self.output_variable
-        return input_dy * out_dy
+        return input_dy * out_dy()
 
 
 # Exp 函数的便捷接口
