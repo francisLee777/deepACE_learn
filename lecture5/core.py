@@ -288,6 +288,21 @@ def log(x):
     return Log()(x)
 
 
+class MatMul(Function):
+    def forward(self, input_x, input_W):
+        return input_x @ input_W
+
+    def backward(self, input_dy: Variable):
+        input_x, input_W = self.input_variable
+        dx = matmul(input_dy, input_W.T)
+        dW = matmul(input_x.T, input_dy)
+        return dx, dW
+
+
+def matmul(input_x, input_W):
+    return MatMul()(input_x, input_W)
+
+
 #  ———————————————————————— end 基础运算：加减乘除,平方,指数,幂次, sin/cos/tan/log  ——————————————————————————————
 
 #  ———————————————————————— start 改变形状: reshape, 转秩, 广播/求和  ——————————————————————————————
@@ -429,6 +444,43 @@ def numerical_differentiation(func, input_var, eps=1e-4):
     return (y1.value - y0.value) / (2 * eps)
 
 
+#  ———————————————————————— start 基础的深度学习网络组件  ——————————————————————————————
+
+class Linear(Function):
+    def forward(self, x, W, b):
+        y = x @ W
+        if b is not None:  # 偏置，是可选项
+            y += b
+        return y
+
+    def backward(self, dy):
+        x, W, b = self.input_variable
+        db = None if b.value is None else sum(dy, b.shape)
+        dx = matmul(dy, W.T)
+        dW = matmul(x.T, dy)
+        return dx, dW, db
+
+
+def linear(input_x, W, b=None):
+    return Linear()(input_x, W, b)
+
+
+class MeanSquaredError(Function):
+    def forward(self, y0, y1):
+        diff = y1 - y0
+        return sum(diff ** 2) / len(diff)
+
+    def backward(self, dy):
+        y0, y1 = self.input_variable
+        diff = y1 - y0
+        dy0 = dy * diff * (2.0 / len(diff))
+        dy1 = -dy0
+        return dy0, dy1
+
+
+#  ———————————————————————— end 基础的深度学习网络组件  ——————————————————————————————
+
+
 class Variable:
     __array_priority__ = 999
 
@@ -468,6 +520,9 @@ class Variable:
             shape = shape[0]
         return reshape(self, shape)
 
+    def matmul(self, other):
+        return matmul(self, other)
+
     def __len__(self):
         return len(self.value)
 
@@ -483,6 +538,12 @@ class Variable:
 
     def __rmul__(self, other):
         return mul(other, self)
+
+    def __matmul__(self, other):
+        return matmul(self, other)
+
+    def __rmatmul__(self, other):
+        return matmul(other, self)
 
     def __add__(self, other):
         return add(self, other)
@@ -577,34 +638,53 @@ def util_sum_to(input_x, target_shape):
 
 
 if __name__ == '__main__':
-    a = np.array([[1, 2, 3], [4, 5, 6]])
-    np.sum(a, axis=1)
+    # x = Variable(np.array([[1, 2]]))  # (1, 2)
+    # W = Variable(np.array([[5, 6], [7, 8]]))  # (2, 2)
+    # # y = matmul(x, W)  # (1, 2)
+    # # y = x.matmul(W)
+    # y = x @ W
+    # # np.dot(x, W)  不推荐使用
+    # y.backward(retain_grad=True)
+    # print(x.shape, W.shape, y.shape)
+    # print(y)
+    # print(x.grad)
 
-    x1 = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    x2 = Variable(np.array([[1, 2, 3]]))
-    y = x1 + x2
-    y.backward()
+    # 学习率
+    lr = 0.1
+    iters = 100  # 循环次数
 
-    print("y:", y)  # [[2,4,6],[5,7,9]]
-    print("x1.grad:", x1.grad)  # [[1 1 1] [1 1 1]]
-    print("x2.grad:", x2.grad)  # [[1 1 1] [1 1 1]] 但实际上应该是 [2,2,2]
+    x = np.random.rand(100, 1)  # 形状 (100, 1) 每个元素都是 [0, 1) 浮点数
+    print(x.shape)
+    # print(x[2][0])
+    y = 25 * x + 38 + np.random.rand(100, 1)  # 形状 (100, 1)
 
-    a = np.array([[1., 2.]])  # 形状 (1, 2)
-    b = np.array([[5., 6.], [7., 8.]])  # 形状 (2, 2)
+    # 权重
+    b = Variable(np.zeros(1))  # 初始化为 0     形状: (1, )
+    W = Variable(np.zeros((1, 1)))  # 初始化为 0  形状 (1, 1)
 
-    # 前向传播
-    c = np.dot(a, b)  # 形状 (1, 2)
-    print("前向传播结果 c:", c)  # [[19. 22.]]
 
-    # 假设损失函数 L = sum(c)，即 ∂L/∂c = ones(1, 2)
-    dc = np.ones(c.shape)  # ∂L/∂c = [[1, 1]]
-    print("∂L/∂c:", dc)
+    # 把输入数据和权重参数输入到深度学习网络中，得到预测值
+    def predict(x):  # 输出 Variable
+        return matmul(x, W) + b
 
-    # 反向传播计算梯度
-    # ∂L/∂a = ∂L/∂c × b^T
-    da = np.dot(dc, b.T)
-    print("∂L/∂a:", da)  # [[12, 15]]
 
-    # ∂L/∂b = a^T × ∂L/∂c
-    db = np.dot(a.T, dc)
-    print("∂L/∂b:", db)  # [[1, 1], [1, 1]]
+    def mean_square_error(y0, y1):  # 输出 Variable
+        diff = y1 - y0
+        return sum(diff ** 2) / len(diff)
+
+
+    # 训练
+    for i in range(iters):
+        print("W:", W.value)
+        print("b:", b.value)
+
+        y_predit = predict(x)  # 输出 Variable
+        loss = mean_square_error(y, y_predit)  # 计算误差，得到 loss 损失值 (Variable类型)
+
+        loss.backward()  # 损失函数的反向传播
+
+        W.value -= lr * W.grad.value  # 根据梯度值，更新各个权重参数 [有各种方式的方式]
+        b.value -= lr * b.grad.value
+
+        W.grad = None  # 每次迭代之后，需要把梯度重置为0，否则会影响下一次迭代计算梯度
+        b.grad = None
