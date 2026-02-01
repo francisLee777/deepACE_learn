@@ -1,3 +1,5 @@
+import os
+import subprocess
 import warnings
 import weakref
 
@@ -461,7 +463,7 @@ class Sigmoid(Function):
 
     def backward(self, dy):
         y = self.output_variable[0]
-        dx = dy * y * (1 - y)
+        dx = dy * y() * (1 - y())
         return dx
 
 
@@ -668,6 +670,74 @@ def util_sum_to(input_x, target_shape):
     return y
 
 
+def _dot_var(v, verbose=False):
+    dot_var = '{} [label="{}", color=orange, style=filled]\n'
+
+    name = '' if v.name is None else v.name
+    if verbose and v.value is not None:
+        if v.name is not None:
+            name += ': '
+        name += str(v.value.shape) + ' '
+
+    return dot_var.format(id(v), name)
+
+
+def _dot_func(f):
+    # for function
+    dot_func = '{} [label="{}", color=lightblue, style=filled, shape=box]\n'
+    ret = dot_func.format(id(f), f.__class__.__name__)
+
+    # for edge
+    dot_edge = '{} -> {}\n'
+    for x in f.input_variable:
+        ret += dot_edge.format(id(x), id(f))
+    for y in f.output_variable:
+        ret += dot_edge.format(id(f), id(y()))
+    return ret
+
+
+def get_dot_graph(output, verbose=True):
+    txt = ''
+    funcs = []
+    visited = set()
+
+    def add_func(f):
+        if f not in visited:
+            funcs.append(f)
+            # funcs.sort(key=lambda x: x.generation)
+            visited.add(f)
+
+    add_func(output.creator)
+    txt += _dot_var(output, verbose)
+
+    while funcs:
+        func = funcs.pop()
+        txt += _dot_func(func)
+        for x in func.input_variable:
+            txt += _dot_var(x, verbose)
+
+            if x.creator is not None:
+                add_func(x.creator)
+
+    return 'digraph g {\n' + txt + '}'
+
+
+def plot_dot_graph(output, verbose=True, to_file='graph_ouput/graph.png'):
+    dot_graph = get_dot_graph(output, verbose)
+
+    tmp_dir = os.path.join(os.path.expanduser('~'), '.test')
+    if not os.path.exists(tmp_dir):
+        os.mkdir(tmp_dir)
+    graph_path = os.path.join(tmp_dir, 'tmp_graph.dot')
+
+    with open(graph_path, 'w') as f:
+        f.write(dot_graph)
+
+    extension = os.path.splitext(to_file)[1][1:]
+    cmd = 'dot {} -T {} -o {}'.format(graph_path, extension, to_file)
+    subprocess.run(cmd, shell=True)
+
+
 # 变量类，继承Variable类
 class Parameter(Variable):
     pass
@@ -699,7 +769,11 @@ class Layer:
 
     def params(self):
         for name in self._params_name:
-            yield self.__dict__[name]
+            obj = self.__dict__[name]
+            if isinstance(obj, Layer):  # 如果是 Layer 层，递归 yield
+                yield from obj.params()
+            else:
+                yield obj
 
         # 清除所有参数的梯度
 
@@ -737,16 +811,21 @@ class LinearLayer(Layer):
         self.W.value = W_init
 
 
-def sigmoid_simple(x):
-    y = 0
-    try:
-        y = 1 / (1 + exp(-x))
-    except RuntimeWarning as e:
-        print(f"警告发生位置，输入值: {x}")
-        # 添加断点或打印语句
-        import traceback
-        traceback.print_exc()
-    return y
+class Model(Layer):
+    def plot(self, *inputs, to_file="model.png"):
+        y = self.forward(*inputs)
+        return plot_dot_graph(y, verbose=True, to_file=to_file)
+
+
+class TwoLayerNet(Model):
+    def __init__(self, hidden_size, output_size, dtype=np.float32):
+        super().__init__()
+        self.l1 = LinearLayer(hidden_size, dtype=dtype)
+        self.l2 = LinearLayer(output_size, dtype=dtype)
+
+    def forward(self, x):
+        h = sigmoid(self.l1(x))
+        return self.l2(h)
 
 
 if __name__ == "__main__":
@@ -759,7 +838,7 @@ if __name__ == "__main__":
 
     def predict(x):
         h = l1(x)
-        y = sigmoid_simple(h)
+        y = sigmoid(h)
         return l2(y)
 
 
@@ -772,8 +851,19 @@ if __name__ == "__main__":
         l1.clear_grads()
         l2.clear_grads()
         loss.backward()
+
         for l in [l1, l2]:
             for param in l.params():
-                param.value -= lr * param.grad.value
+                print('循环次数:', i, '参数', param.name, np.max(param.value), np.min(param.value), '参数梯度',
+                      np.max(param.grad.value),
+                      np.min(param.grad.value))
+                try:
+                    param.value -= lr * param.grad.value
+                except RuntimeWarning as e:
+                    print(f"警告发生位置，输入值: {param.value} 减去 {lr * param.grad.value}")
+                    # 添加断点或打印语句
+                    import traceback
+
+                    traceback.print_exc()
         if i % 100 == 0:
             print(f"iter {i}, loss: {loss.value:.4f}")

@@ -647,54 +647,125 @@ def sigmoid_simple(x):
     return y
 
 
+def numerical_gradient_matrix(func, input_x, eps=1e-4):
+    x_ndarray = input_x.value
+    rows = x_ndarray.shape[0]
+    cols = x_ndarray.shape[1]
+
+    grad = np.zeros_like(x_ndarray)
+    for i in range(rows):
+        for j in range(cols):
+            original_value = x_ndarray[i, j]
+
+            x_ndarray[i, j] = original_value + eps
+            v_plus = Variable(x_ndarray.copy())
+            y0 = func(v_plus)
+
+            x_ndarray[i, j] = original_value - eps
+            v_minus = Variable(x_ndarray.copy())
+            y1 = func(v_minus)
+
+            grad[i, j] = (y0.value - y1.value) / (2 * eps)
+            x_ndarray[i, j] = original_value
+    return grad
+
+
+def numerical_gradient_matrix_x(f, x, W, eps=1e-4):
+    # 获取x的原始数据
+    x_data = x.value
+    grad = np.zeros_like(x_data)
+
+    # 对x的每个元素进行扰动
+    for idx in np.ndindex(x_data.shape):
+        x_plus = x_data.copy()
+        x_minus = x_data.copy()
+        # 正向扰动
+        x_plus[idx] = x_plus[idx] + eps
+        y1 = f(Variable(x_plus), W)
+        # 负向扰动
+        x_minus[idx] = x_minus[idx] - eps
+        y2 = f(Variable(x_minus), W)
+        # 中心差分法计算梯度
+        temp = (y1 - y2).value
+
+        grad[idx] = temp / (2 * eps)
+    return grad
+
+
+def numerical_gradient_matrix_w(f, x, W, eps=1e-4):
+    # 获取W的原始数据
+    W_data = W.value
+    grad = np.zeros_like(W_data)
+
+    # 对W的每个元素进行扰动
+    for idx in np.ndindex(W_data.shape):
+        W_plus = W_data.copy()
+        W_minus = W_data.copy()
+        # 正向扰动
+        W_plus[idx] = W_plus[idx] + eps
+        y1 = f(x, Variable(W_plus))
+        # 负向扰动
+        W_minus[idx] = W_minus[idx] - eps
+        y2 = f(x, Variable(W_minus))
+        # 中心差分法计算梯度
+        temp = (y1 - y2).value
+
+        grad[idx] = temp / (2 * eps)
+    return grad
+
+
+def tempFunc(x, y):
+    return sum(x @ y)
+
+
 if __name__ == '__main__':
-    # x = Variable(np.array([[1, 2]]))  # (1, 2)
-    # W = Variable(np.array([[5, 6], [7, 8]]))  # (2, 2)
-    # # y = matmul(x, W)  # (1, 2)
-    # # y = x.matmul(W)
-    # y = x @ W
-    # # np.dot(x, W)  不推荐使用
-    # y.backward(retain_grad=True)
-    # print(x.shape, W.shape, y.shape)
-    # print(y)
-    # print(x.grad)
+    x = Variable(np.array([[1, 2]], dtype=np.float64))  # (1, 2)
+    W = Variable(np.array([[5, 6], [7, 8]], dtype=np.float64))  # (2, 2)
+
+    result = tempFunc(x, W)
+    result.backward()
+
+    print("x.grad结果:", x.grad, "W.grad结果:", W.grad)  # 能够正确输出梯度
+
+    print("数值微分法得到的 x.grad ", numerical_gradient_matrix_x(tempFunc, x, W))
+    print("数值微分法得到的 W.grad ", numerical_gradient_matrix_w(tempFunc, x, W))
 
     # 学习率
-    lr = 0.1
-    iters = 100  # 循环次数
-
-    x = np.random.rand(100, 1)  # 形状 (100, 1) 每个元素都是 [0, 1) 浮点数
-    print(x.shape)
-    # print(x[2][0])
-    y = 25 * x + 38 + np.random.rand(100, 1)  # 形状 (100, 1)
-
-    # 权重
-    b = Variable(np.zeros(1))  # 初始化为 0     形状: (1, )
-    W = Variable(np.zeros((1, 1)))  # 初始化为 0  形状 (1, 1)
-
-
-    # 把输入数据和权重参数输入到深度学习网络中，得到预测值
-    def predict(x):  # 输出 Variable
-        return matmul(x, W) + b
-
-
-    def mean_square_error(y0, y1):  # 输出 Variable
-        diff = y1 - y0
-        return sum(diff ** 2) / len(diff)
-
-
-    # 训练
-    for i in range(iters):
-        print("W:", W.value)
-        print("b:", b.value)
-
-        y_predit = predict(x)  # 输出 Variable
-        loss = mean_square_error(y, y_predit)  # 计算误差，得到 loss 损失值 (Variable类型)
-
-        loss.backward()  # 损失函数的反向传播
-
-        W.value -= lr * W.grad.value  # 根据梯度值，更新各个权重参数 [有各种方式的方式]
-        b.value -= lr * b.grad.value
-
-        W.grad = None  # 每次迭代之后，需要把梯度重置为0，否则会影响下一次迭代计算梯度
-        b.grad = None
+    # lr = 0.1
+    # iters = 100  # 循环次数
+    #
+    # x = np.random.rand(100, 1)  # 形状 (100, 1) 每个元素都是 [0, 1) 浮点数
+    # # print(x.shape)
+    # # print(x[2][0])
+    # y = 25 * x + 38 + np.random.rand(100, 1)  # 形状 (100, 1)
+    #
+    # # 权重
+    # b = Variable(np.zeros(1))  # 初始化为 0     形状: (1, )
+    # W = Variable(np.zeros((1, 1)))  # 初始化为 0  形状 (1, 1)
+    #
+    #
+    # # 把输入数据和权重参数输入到深度学习网络中，得到预测值
+    # def predict(x):  # 输出 Variable
+    #     return matmul(x, W) + b
+    #
+    #
+    # def mean_square_error(y0, y1):  # 输出 Variable
+    #     diff = y1 - y0
+    #     return sum(diff ** 2) / len(diff)
+    #
+    #
+    # # 训练
+    # for i in range(iters):
+    #     # print("W:", W.value)
+    #     # print("b:", b.value)
+    #
+    #     y_predit = predict(x)  # 输出 Variable
+    #     loss = mean_square_error(y, y_predit)  # 计算误差，得到 loss 损失值 (Variable类型)
+    #
+    #     loss.backward()  # 损失函数的反向传播
+    #
+    #     W.value -= lr * W.grad.value  # 根据梯度值，更新各个权重参数 [有各种方式的方式]
+    #     b.value -= lr * b.grad.value
+    #
+    #     W.grad = None  # 每次迭代之后，需要把梯度重置为0，否则会影响下一次迭代计算梯度
+    #     b.grad = None
