@@ -1,6 +1,153 @@
+import warnings
 import weakref
 
 import numpy as np
+
+# 捕获警告并显示详细信息
+warnings.filterwarnings('error')  # 将警告转换为错误，方便定位
+
+
+class Variable:
+    __array_priority__ = 999
+
+    def __init__(self, input_data, name=None):
+        if input_data is not None and not isinstance(input_data, np.ndarray):
+            raise TypeError('{} is not supported'.format(type(input_data)))
+        self.name = name
+        self.value = input_data
+        self.grad = None  # 梯度 默认为 None
+        self.creator = None  # 创建函数 默认为 None
+
+    @property
+    def shape(self):
+        return self.value.shape
+
+    @property
+    def ndim(self):
+        return self.value.ndim
+
+    @property
+    def size(self):
+        return self.value.size
+
+    @property
+    def dtype(self):
+        return self.value.dtype
+
+    @property
+    def T(self):
+        return self.transpose()
+
+    def transpose(self):
+        return transpose(self)
+
+    def reshape(self, *shape):  # 多入参
+        if len(shape) == 1:
+            shape = shape[0]
+        return reshape(self, shape)
+
+    def matmul(self, other):
+        return matmul(self, other)
+
+    def __len__(self):
+        return len(self.value)
+
+    def __repr__(self):
+        if self.value is None:
+            return 'variable(None)'
+        p = str(self.value).replace('\n', '\n' + ' ' * 9)
+        return 'variable(' + p + ')'
+
+    # 运算符重载
+    def __mul__(self, other):
+        return mul(self, other)
+
+    def __rmul__(self, other):
+        return mul(other, self)
+
+    def __matmul__(self, other):
+        return matmul(self, other)
+
+    def __rmatmul__(self, other):
+        return matmul(other, self)
+
+    def __add__(self, other):
+        return add(self, other)
+
+    def __radd__(self, other):
+        return add(other, self)
+
+    def __sub__(self, other):
+        return sub(self, other)
+
+    def __rsub__(self, other):
+        return sub(other, self)
+
+    def __pow__(self, other):
+        return pow(self, other)
+
+    # def __rpow__(self, other):
+    #     return pow(other, self)
+
+    def __truediv__(self, other):
+        return div(self, other)
+
+    def __rtruediv__(self, other):
+        return div(other, self)
+
+    def __neg__(self):
+        return neg(self)
+
+    def __abs__(self):
+        return abs(self)
+
+    def clear_grad(self):
+        self.grad = None
+
+    def backward(self, retain_grad=False):
+        if self.grad is None:
+            self.grad = Variable(np.ones_like(self.value))
+
+        # 创建一个列表来存储需要处理的函数和梯度对
+        funcs = []
+        visited = set()  # 用于跟踪已访问的函数，避免重复处理
+
+        # 后序遍历收集所有函数
+        def add_func(temp_func):
+            if temp_func not in visited:
+                # 先添加输入变量的创建函数
+                visited.add(temp_func)
+                # 把输入变量的所有创建函数也添加到列表中
+                for temp_xx in temp_func.input_variable:
+                    if temp_xx.creator is not None:
+                        add_func(temp_xx.creator)
+                # 再添加当前函数
+                funcs.append(temp_func)
+
+        # 如果当前变量有创建函数，开始收集
+        if self.creator is not None:
+            add_func(self.creator)
+
+        # 按照后序遍历的逆序（从输出到输入）处理每个函数
+        for f in funcs[::-1]:
+            # 计算当前函数的梯度
+            output_grads = [temp_y().grad for temp_y in f.output_variable]  # 元素类型是 Variable 类型
+            grads = f.backward(*output_grads)  # 计算结果是 Variable 类型
+            if not isinstance(grads, tuple):
+                grads = (grads,)
+
+            # 将梯度传递给输入变量
+            for i, temp_x in enumerate(f.input_variable):
+                if temp_x.grad is None:
+                    temp_x.grad = grads[i]
+                else:
+                    # 不能写成 temp_x.grad += grads[i]，否则在 Python 的语义中，就地修改原有对象，如果其他节点仍然在依赖这个 temp_x.grad, 会被污染数据。
+                    temp_x.grad = temp_x.grad + grads[i]
+
+            # 如果不需要保留梯度，则把中间变量的梯度都置为None
+            if not retain_grad:
+                for temp_y in f.output_variable:
+                    temp_y().grad = None  # 弱引用使用 ()
 
 
 class Function:
@@ -305,6 +452,25 @@ def matmul(input_x, input_W):
 
 #  ———————————————————————— end 基础运算：加减乘除,平方,指数,幂次, sin/cos/tan/log  ——————————————————————————————
 
+#  ———————————————————————— start 激活函数  sigmoid/relu 等  ——————————————————————————————
+class Sigmoid(Function):
+    def forward(self, x):
+        # y = 1 / (1 + np.exp(-x))
+        y = np.tanh(x * 0.5) * 0.5 + 0.5  # Better implementation
+        return y
+
+    def backward(self, dy):
+        y = self.output_variable[0]
+        dx = dy * y * (1 - y)
+        return dx
+
+
+def sigmoid(x):
+    return Sigmoid()(x)
+
+
+#  ———————————————————————— end 激活函数  sigmoid/relu 等  ——————————————————————————————
+
 #  ———————————————————————— start 改变形状: reshape, 转秩, 广播/求和  ——————————————————————————————
 class Reshape(Function):
     def __init__(self, target_shape):
@@ -486,146 +652,6 @@ def mean_squared_error(x0, x1):
 #  ———————————————————————— end 基础的深度学习网络组件  ——————————————————————————————
 
 
-class Variable:
-    __array_priority__ = 999
-
-    def __init__(self, input_data, name=None):
-        if input_data is not None and not isinstance(input_data, np.ndarray):
-            raise TypeError('{} is not supported'.format(type(input_data)))
-        self.name = name
-        self.value = input_data
-        self.grad = None  # 梯度 默认为 None
-        self.creator = None  # 创建函数 默认为 None
-
-    @property
-    def shape(self):
-        return self.value.shape
-
-    @property
-    def ndim(self):
-        return self.value.ndim
-
-    @property
-    def size(self):
-        return self.value.size
-
-    @property
-    def dtype(self):
-        return self.value.dtype
-
-    @property
-    def T(self):
-        return self.transpose()
-
-    def transpose(self):
-        return transpose(self)
-
-    def reshape(self, *shape):  # 多入参
-        if len(shape) == 1:
-            shape = shape[0]
-        return reshape(self, shape)
-
-    def matmul(self, other):
-        return matmul(self, other)
-
-    def __len__(self):
-        return len(self.value)
-
-    def __repr__(self):
-        if self.value is None:
-            return 'variable(None)'
-        p = str(self.value).replace('\n', '\n' + ' ' * 9)
-        return 'variable(' + p + ')'
-
-    # 运算符重载
-    def __mul__(self, other):
-        return mul(self, other)
-
-    def __rmul__(self, other):
-        return mul(other, self)
-
-    def __matmul__(self, other):
-        return matmul(self, other)
-
-    def __rmatmul__(self, other):
-        return matmul(other, self)
-
-    def __add__(self, other):
-        return add(self, other)
-
-    def __radd__(self, other):
-        return add(other, self)
-
-    def __sub__(self, other):
-        return sub(self, other)
-
-    def __rsub__(self, other):
-        return sub(other, self)
-
-    def __pow__(self, other):
-        return pow(self, other)
-
-    # def __rpow__(self, other):
-    #     return pow(other, self)
-
-    def __truediv__(self, other):
-        return div(self, other)
-
-    def __rtruediv__(self, other):
-        return div(other, self)
-
-    def __neg__(self):
-        return neg(self)
-
-    def __abs__(self):
-        return abs(self)
-
-    def backward(self, retain_grad=False):
-        if self.grad is None:
-            self.grad = Variable(np.ones_like(self.value))
-
-        # 创建一个列表来存储需要处理的函数和梯度对
-        funcs = []
-        visited = set()  # 用于跟踪已访问的函数，避免重复处理
-
-        # 后序遍历收集所有函数
-        def add_func(temp_func):
-            if temp_func not in visited:
-                # 先添加输入变量的创建函数
-                visited.add(temp_func)
-                # 把输入变量的所有创建函数也添加到列表中
-                for temp_xx in temp_func.input_variable:
-                    if temp_xx.creator is not None:
-                        add_func(temp_xx.creator)
-                # 再添加当前函数
-                funcs.append(temp_func)
-
-        # 如果当前变量有创建函数，开始收集
-        if self.creator is not None:
-            add_func(self.creator)
-
-        # 按照后序遍历的逆序（从输出到输入）处理每个函数
-        for f in funcs[::-1]:
-            # 计算当前函数的梯度
-            output_grads = [temp_y().grad for temp_y in f.output_variable]  # 元素类型是 Variable 类型
-            grads = f.backward(*output_grads)  # 计算结果是 Variable 类型
-            if not isinstance(grads, tuple):
-                grads = (grads,)
-
-            # 将梯度传递给输入变量
-            for i, temp_x in enumerate(f.input_variable):
-                if temp_x.grad is None:
-                    temp_x.grad = grads[i]
-                else:
-                    # 不能写成 temp_x.grad += grads[i]，否则在 Python 的语义中，就地修改原有对象，如果其他节点仍然在依赖这个 temp_x.grad, 会被污染数据。
-                    temp_x.grad = temp_x.grad + grads[i]
-
-            # 如果不需要保留梯度，则把中间变量的梯度都置为None
-            if not retain_grad:
-                for temp_y in f.output_variable:
-                    temp_y().grad = None  # 弱引用使用 ()
-
-
 def temp_fun(x, y):
     return pow(x + 1, 2) * neg(y) - abs(x - y) + y ** 2
 
@@ -642,59 +668,112 @@ def util_sum_to(input_x, target_shape):
     return y
 
 
+# 变量类，继承Variable类
+class Parameter(Variable):
+    pass
+
+
+class Layer:
+    def __init__(self):
+        self._params_name = set()  # set 是集合，无序且元素唯一
+
+    def __setattr__(self, name, value):
+        # 只搜集Parameter，不搜集Variable和其他类型
+        if isinstance(value, Parameter):
+            # 仅加入字段名， value 值可以通过self.__dict__[name]获取
+            self._params_name.add(name)
+        super().__setattr__(name, value)
+
+    def __call__(self, *inputs):
+        outputs = self.forward(*inputs)
+        if not isinstance(outputs, tuple):
+            outputs = (outputs,)
+        # tuple 不可变，转换成 list 类型
+        self.inputs, self.outputs = list(inputs), list(outputs)
+        return outputs if len(outputs) > 1 else outputs[0]
+
+    def forward(self, inputs):
+        raise NotImplementedError()
+
+        # 获取所有变量， yield 方式
+
+    def params(self):
+        for name in self._params_name:
+            yield self.__dict__[name]
+
+        # 清除所有参数的梯度
+
+    def clear_grads(self):
+        for param in self.params():
+            param.clear_grad()
+
+
+class LinearLayer(Layer):
+    # 不显式指定入参 input_size ， 在 forward 中根据输入动态确定
+    def __init__(self, output_size, input_size=None, need_bias=True, dtype=np.float32):
+        super().__init__()
+        self.input_size, self.output_size, self.dtype = input_size, output_size, dtype
+
+        self.W = Parameter(None, name="W")
+        if self.input_size is not None:
+            self._init_W()
+
+        self.b = None
+        if need_bias:
+            self.b = Parameter(np.zeros(output_size).astype(dtype), name="b")
+
+    def forward(self, inputs):
+        # 如果之前没有指定输入维度，这里根据第一个输入的形状动态确定，并且初始化权重矩阵W
+        if self.input_size is None:
+            self.input_size = inputs.shape[1]
+            self._init_W()
+
+        return linear(inputs, self.W, self.b)
+
+    def _init_W(self):
+        I, O = self.input_size, self.output_size
+        # 根据输入和输出的维度，初始化权重矩阵W，这里使用了Xavier初始化方法
+        W_init = np.random.randn(I, O).astype(self.dtype) * np.sqrt(1.0 / I)
+        self.W.value = W_init
+
+
 def sigmoid_simple(x):
-    y = 1 / (1 + exp(-x))
+    y = 0
+    try:
+        y = 1 / (1 + exp(-x))
+    except RuntimeWarning as e:
+        print(f"警告发生位置，输入值: {x}")
+        # 添加断点或打印语句
+        import traceback
+        traceback.print_exc()
     return y
 
 
-if __name__ == '__main__':
-    # x = Variable(np.array([[1, 2]]))  # (1, 2)
-    # W = Variable(np.array([[5, 6], [7, 8]]))  # (2, 2)
-    # # y = matmul(x, W)  # (1, 2)
-    # # y = x.matmul(W)
-    # y = x @ W
-    # # np.dot(x, W)  不推荐使用
-    # y.backward(retain_grad=True)
-    # print(x.shape, W.shape, y.shape)
-    # print(y)
-    # print(x.grad)
+if __name__ == "__main__":
+    x = np.random.randn(100, 1)
+    y = np.sin(2 * np.pi * x) + np.random.randn(100, 1)  # 使用其他函数也可以
 
-    # 学习率
+    l1 = LinearLayer(10)
+    l2 = LinearLayer(1)
+
+
+    def predict(x):
+        h = l1(x)
+        y = sigmoid_simple(h)
+        return l2(y)
+
+
     lr = 0.1
-    iters = 100  # 循环次数
+    iters = 1000
 
-    x = np.random.rand(100, 1)  # 形状 (100, 1) 每个元素都是 [0, 1) 浮点数
-    print(x.shape)
-    # print(x[2][0])
-    y = 25 * x + 38 + np.random.rand(100, 1)  # 形状 (100, 1)
-
-    # 权重
-    b = Variable(np.zeros(1))  # 初始化为 0     形状: (1, )
-    W = Variable(np.zeros((1, 1)))  # 初始化为 0  形状 (1, 1)
-
-
-    # 把输入数据和权重参数输入到深度学习网络中，得到预测值
-    def predict(x):  # 输出 Variable
-        return matmul(x, W) + b
-
-
-    def mean_square_error(y0, y1):  # 输出 Variable
-        diff = y1 - y0
-        return sum(diff ** 2) / len(diff)
-
-
-    # 训练
     for i in range(iters):
-        print("W:", W.value)
-        print("b:", b.value)
-
-        y_predit = predict(x)  # 输出 Variable
-        loss = mean_square_error(y, y_predit)  # 计算误差，得到 loss 损失值 (Variable类型)
-
-        loss.backward()  # 损失函数的反向传播
-
-        W.value -= lr * W.grad.value  # 根据梯度值，更新各个权重参数 [有各种方式的方式]
-        b.value -= lr * b.grad.value
-
-        W.grad = None  # 每次迭代之后，需要把梯度重置为0，否则会影响下一次迭代计算梯度
-        b.grad = None
+        y_predict = predict(x)
+        loss = mean_squared_error(y, y_predict)
+        l1.clear_grads()
+        l2.clear_grads()
+        loss.backward()
+        for l in [l1, l2]:
+            for param in l.params():
+                param.value -= lr * param.grad.value
+        if i % 100 == 0:
+            print(f"iter {i}, loss: {loss.value:.4f}")
