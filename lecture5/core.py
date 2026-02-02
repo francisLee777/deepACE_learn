@@ -718,54 +718,59 @@ def tempFunc(x, y):
     return sum(x @ y)
 
 
+def sigmoid_simple(x):
+    y = 1 / (1 + exp(-x))
+    return y
+
+
 if __name__ == '__main__':
-    x = Variable(np.array([[1, 2]], dtype=np.float64))  # (1, 2)
-    W = Variable(np.array([[5, 6], [7, 8]], dtype=np.float64))  # (2, 2)
+    # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
+    x = Variable(np.linspace(0, 3, 100).reshape(100, 1))  # (100, 1)
+    y = exp(x)  # 真实值
 
-    result = tempFunc(x, W)
-    result.backward()
+    # 简单的两层网络
+    W1 = Variable(0.01 * np.random.randn(1, 100))  # (1, custom_dimension)
+    b1 = Variable(np.zeros(100))  # (custom_dimension, )
+    W2 = Variable(0.01 * np.random.randn(100, 1))  # (custom_dimension, 1)
+    b2 = Variable(np.zeros(1))  # (1, )
 
-    print("x.grad结果:", x.grad, "W.grad结果:", W.grad)  # 能够正确输出梯度
 
-    print("数值微分法得到的 x.grad ", numerical_gradient_matrix_x(tempFunc, x, W))
-    print("数值微分法得到的 W.grad ", numerical_gradient_matrix_w(tempFunc, x, W))
+    def abs_loss(x0, x1):
+        diff = abs(x1 - x0)
+        return sum(diff) / len(diff)  # 除以样本数量, 防止误差过大溢出以及学习率无法调整
 
-    # 学习率
-    # lr = 0.1
-    # iters = 100  # 循环次数
-    #
-    # x = np.random.rand(100, 1)  # 形状 (100, 1) 每个元素都是 [0, 1) 浮点数
-    # # print(x.shape)
-    # # print(x[2][0])
-    # y = 25 * x + 38 + np.random.rand(100, 1)  # 形状 (100, 1)
-    #
-    # # 权重
-    # b = Variable(np.zeros(1))  # 初始化为 0     形状: (1, )
-    # W = Variable(np.zeros((1, 1)))  # 初始化为 0  形状 (1, 1)
-    #
-    #
-    # # 把输入数据和权重参数输入到深度学习网络中，得到预测值
-    # def predict(x):  # 输出 Variable
-    #     return matmul(x, W) + b
-    #
-    #
-    # def mean_square_error(y0, y1):  # 输出 Variable
-    #     diff = y1 - y0
-    #     return sum(diff ** 2) / len(diff)
-    #
-    #
-    # # 训练
-    # for i in range(iters):
-    #     # print("W:", W.value)
-    #     # print("b:", b.value)
-    #
-    #     y_predit = predict(x)  # 输出 Variable
-    #     loss = mean_square_error(y, y_predit)  # 计算误差，得到 loss 损失值 (Variable类型)
-    #
-    #     loss.backward()  # 损失函数的反向传播
-    #
-    #     W.value -= lr * W.grad.value  # 根据梯度值，更新各个权重参数 [有各种方式的方式]
-    #     b.value -= lr * b.grad.value
-    #
-    #     W.grad = None  # 每次迭代之后，需要把梯度重置为0，否则会影响下一次迭代计算梯度
-    #     b.grad = None
+
+    def predict(x):
+        temp = matmul(x, W1) + b1
+        print("第一层的输出维度是: ", temp.shape)
+        temp = sigmoid_simple(temp)
+        result = matmul(temp, W2) + b2
+        print("第二层的输出维度是: ", result.shape)
+        return result
+
+
+    lr = 0.03  # 学习率
+    iters = 10000  # 迭代次数
+
+    for epoch in range(iters):
+        y_predit = predict(x)
+        loss = abs_loss(y, y_predit)
+
+        loss.backward()  # 损失函数反向传播
+
+        W1.value -= lr * W1.grad.value
+        b1.value -= lr * b1.grad.value
+        W2.value -= lr * W2.grad.value
+        b2.value -= lr * b2.grad.value
+
+        W1.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
+        b1.grad = None
+        W2.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
+        b2.grad = None
+
+        if epoch % 100 == 0:  # 每100次，打印输出一下损失值
+            print(f"{epoch}: loss={loss.value:.4f}")
+
+    test_x = 1.5
+    print(np.exp(test_x))  # 真实值
+    print(predict(Variable(np.array([test_x]))))  # 输入进训练后的模型，得到的结果

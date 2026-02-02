@@ -1,12 +1,8 @@
 import os
 import subprocess
-import warnings
 import weakref
 
 import numpy as np
-
-# 捕获警告并显示详细信息
-warnings.filterwarnings('error')  # 将警告转换为错误，方便定位
 
 
 class Variable:
@@ -102,9 +98,6 @@ class Variable:
 
     def __abs__(self):
         return abs(self)
-
-    def clear_grad(self):
-        self.grad = None
 
     def backward(self, retain_grad=False):
         if self.grad is None:
@@ -471,6 +464,11 @@ def sigmoid(x):
     return Sigmoid()(x)
 
 
+def sigmoid_simple(x):
+    y = 1 / (1 + exp(-x))
+    return y
+
+
 #  ———————————————————————— end 激活函数  sigmoid/relu 等  ——————————————————————————————
 
 #  ———————————————————————— start 改变形状: reshape, 转秩, 广播/求和  ——————————————————————————————
@@ -522,6 +520,18 @@ def broadcast_to(input_x, target_shape):
     if input_x.shape == target_shape:
         return as_variable(input_x)
     return BroadcastTo(target_shape)(as_variable(as_array(input_x)))
+
+
+def util_sum_to(input_x, target_shape):
+    y = input_x
+    # 处理广播对齐过程中新增的维度：input_x 比 target_shape 多出来的“前导维度”（leading dimensions）
+    while y.ndim > len(target_shape):
+        y = y.sum(axis=0)
+    # 对 shape=1 的维度求和。被拉伸的维度：target_shape 中为 1，但在 input_x 中被拉伸为 N 的维度。
+    for i, sx in enumerate(target_shape):
+        if sx == 1:
+            y = y.sum(axis=i, keepdims=True)
+    return y
 
 
 class SumTo(Function):
@@ -612,6 +622,50 @@ def numerical_differentiation(func, input_var, eps=1e-4):
     return (y1.value - y0.value) / (2 * eps)
 
 
+def numerical_gradient_matrix_x(f, x, W, eps=1e-4):
+    # 获取x的原始数据
+    x_data = x.value
+    grad = np.zeros_like(x_data)
+
+    # 对x的每个元素进行扰动
+    for idx in np.ndindex(x_data.shape):
+        x_plus = x_data.copy()
+        x_minus = x_data.copy()
+        # 正向扰动
+        x_plus[idx] = x_plus[idx] + eps
+        y1 = f(Variable(x_plus), W)
+        # 负向扰动
+        x_minus[idx] = x_minus[idx] - eps
+        y2 = f(Variable(x_minus), W)
+        # 中心差分法计算梯度
+        temp = (y1 - y2).value
+
+        grad[idx] = temp / (2 * eps)
+    return grad
+
+
+def numerical_gradient_matrix_w(f, x, W, eps=1e-4):
+    # 获取W的原始数据
+    W_data = W.value
+    grad = np.zeros_like(W_data)
+
+    # 对W的每个元素进行扰动
+    for idx in np.ndindex(W_data.shape):
+        W_plus = W_data.copy()
+        W_minus = W_data.copy()
+        # 正向扰动
+        W_plus[idx] = W_plus[idx] + eps
+        y1 = f(x, Variable(W_plus))
+        # 负向扰动
+        W_minus[idx] = W_minus[idx] - eps
+        y2 = f(x, Variable(W_minus))
+        # 中心差分法计算梯度
+        temp = (y1 - y2).value
+
+        grad[idx] = temp / (2 * eps)
+    return grad
+
+
 #  ———————————————————————— start 基础的深度学习网络组件  ——————————————————————————————
 
 class Linear(Function):
@@ -651,25 +705,14 @@ def mean_squared_error(x0, x1):
     return MeanSquaredError()(x0, x1)
 
 
+def abs_loss(x0, x1):
+    diff = abs(x1 - x0)
+    return sum(diff) / len(diff)  # 除以样本数量, 防止误差过大溢出以及学习率无法调整
+
+
 #  ———————————————————————— end 基础的深度学习网络组件  ——————————————————————————————
 
-
-def temp_fun(x, y):
-    return pow(x + 1, 2) * neg(y) - abs(x - y) + y ** 2
-
-
-def util_sum_to(input_x, target_shape):
-    y = input_x
-    # 处理广播对齐过程中新增的维度：input_x 比 target_shape 多出来的“前导维度”（leading dimensions）
-    while y.ndim > len(target_shape):
-        y = y.sum(axis=0)
-    # 对 shape=1 的维度求和。被拉伸的维度：target_shape 中为 1，但在 input_x 中被拉伸为 N 的维度。
-    for i, sx in enumerate(target_shape):
-        if sx == 1:
-            y = y.sum(axis=i, keepdims=True)
-    return y
-
-
+#  ———————————————————————— start 计算图构建工具，输出png  ———————————————————————————
 def _dot_var(v, verbose=False):
     dot_var = '{} [label="{}", color=orange, style=filled]\n'
 
@@ -738,132 +781,128 @@ def plot_dot_graph(output, verbose=True, to_file='graph_ouput/graph.png'):
     subprocess.run(cmd, shell=True)
 
 
-# 变量类，继承Variable类
+#  ————————————————————————  end 计算图构建工具，输出png  ———————————————————————————
+
+
+#  ——————————————————————— start 参数,层,网络模型等高层概念  —————————————————————————
 class Parameter(Variable):
-    pass
+
+    def clear_grad(self):
+        self.grad = None
 
 
+# Layer 层
 class Layer:
     def __init__(self):
-        self._params_name = set()  # set 是集合，无序且元素唯一
+        self._params_name = set()  # 名字集合，无序而且元素是唯一的
 
+    # 特殊方法，在设置字段值的时候，会调用这个函数
     def __setattr__(self, name, value):
-        # 只搜集Parameter，不搜集Variable和其他类型
-        if isinstance(value, Parameter):
-            # 仅加入字段名， value 值可以通过self.__dict__[name]获取
+        # 只搜集 Parameter/Layer 类，不搜集 Variable 类和其他类型
+        if isinstance(value, (Parameter, Layer)):
             self._params_name.add(name)
         super().__setattr__(name, value)
+
+    def forward(self, inputs):
+        raise NotImplementedError
 
     def __call__(self, *inputs):
         outputs = self.forward(*inputs)
         if not isinstance(outputs, tuple):
             outputs = (outputs,)
-        # tuple 不可变，转换成 list 类型
         self.inputs, self.outputs = list(inputs), list(outputs)
         return outputs if len(outputs) > 1 else outputs[0]
 
-    def forward(self, inputs):
-        raise NotImplementedError()
-
-        # 获取所有变量， yield 方式
-
     def params(self):
         for name in self._params_name:
+            # __dict__ 对象中所有存储的字段
             obj = self.__dict__[name]
-            if isinstance(obj, Layer):  # 如果是 Layer 层，递归 yield
+            if isinstance(obj, Layer):
                 yield from obj.params()
             else:
-                yield obj
+                yield obj  # 逐个返回
 
-        # 清除所有参数的梯度
-
-    def clear_grads(self):
+    def clear_grad(self):
         for param in self.params():
             param.clear_grad()
 
 
+# 线性层
 class LinearLayer(Layer):
-    # 不显式指定入参 input_size ， 在 forward 中根据输入动态确定
-    def __init__(self, output_size, input_size=None, need_bias=True, dtype=np.float32):
+    # input_size 可以不指定，在真正进行前向传播的时候延迟初始化
+    def __init__(self, output_size, input_size=None, need_bias=True, dtype=np.float64):
         super().__init__()
-        self.input_size, self.output_size, self.dtype = input_size, output_size, dtype
+        self.input_size = input_size
+        self.output_size = output_size
+        self.need_bias = need_bias
+        self.dtype = dtype
 
-        self.W = Parameter(None, name="W")
-        if self.input_size is not None:
-            self._init_W()
-
-        self.b = None
         if need_bias:
-            self.b = Parameter(np.zeros(output_size).astype(dtype), name="b")
+            self.b = Parameter(np.zeros(output_size).astype(dtype), "b")
+        else:
+            self.b = None
 
-    def forward(self, inputs):
-        # 如果之前没有指定输入维度，这里根据第一个输入的形状动态确定，并且初始化权重矩阵W
+    def __init_W(self):
+        # 使用 Xavier 论文的初始化方式
+        W_init = np.random.randn(self.input_size, self.output_size).astype(self.dtype) * np.sqrt(1.0 / self.input_size)
+        self.W = Parameter(W_init, "W")
+
+    def forward(self, input_x):
         if self.input_size is None:
-            self.input_size = inputs.shape[1]
-            self._init_W()
-
-        return linear(inputs, self.W, self.b)
-
-    def _init_W(self):
-        I, O = self.input_size, self.output_size
-        # 根据输入和输出的维度，初始化权重矩阵W，这里使用了Xavier初始化方法
-        W_init = np.random.randn(I, O).astype(self.dtype) * np.sqrt(1.0 / I)
-        self.W.value = W_init
+            self.input_size = input_x.shape[1]
+        self.__init_W()
+        return linear(input_x, self.W, self.b)
 
 
+# 基类
 class Model(Layer):
     def plot(self, *inputs, to_file="model.png"):
         y = self.forward(*inputs)
         return plot_dot_graph(y, verbose=True, to_file=to_file)
 
 
+# 两层线性网络模型
 class TwoLayerNet(Model):
-    def __init__(self, hidden_size, output_size, dtype=np.float32):
+    def __init__(self, hidden_size, output_size, dtype=np.float64):
         super().__init__()
         self.l1 = LinearLayer(hidden_size, dtype=dtype)
         self.l2 = LinearLayer(output_size, dtype=dtype)
 
     def forward(self, x):
-        h = sigmoid(self.l1(x))
-        return self.l2(h)
+        temp = self.l1(x)
+        print("第一层的输出维度是: ", temp.shape)
+        temp = sigmoid_simple(temp)
+        result = self.l2(temp)
+        print("第二层的输出维度是: ", result.shape)
+        return result
 
 
-if __name__ == "__main__":
-    x = np.random.randn(100, 1)
-    y = np.sin(2 * np.pi * x) + np.random.randn(100, 1)  # 使用其他函数也可以
-
-    l1 = LinearLayer(10)
-    l2 = LinearLayer(1)
+#  ——————————————————————— end 参数,层,网络模型等高层概念  —————————————————————————
 
 
-    def predict(x):
-        h = l1(x)
-        y = sigmoid(h)
-        return l2(y)
+if __name__ == '__main__':
+    # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
+    x = Variable(np.linspace(0, 3, 100).reshape(100, 1))  # (100, 1)
+    y = exp(x)  # 真实值
 
+    lr = 0.03  # 学习率
+    iters = 100  # 迭代次数
+    hidden_size = 123
 
-    lr = 0.1
-    iters = 1000
+    model = TwoLayerNet(hidden_size, output_size=1)
 
-    for i in range(iters):
-        y_predict = predict(x)
-        loss = mean_squared_error(y, y_predict)
-        l1.clear_grads()
-        l2.clear_grads()
-        loss.backward()
+    for epoch in range(iters):
 
-        for l in [l1, l2]:
-            for param in l.params():
-                print('循环次数:', i, '参数', param.name, np.max(param.value), np.min(param.value), '参数梯度',
-                      np.max(param.grad.value),
-                      np.min(param.grad.value))
-                try:
-                    param.value -= lr * param.grad.value
-                except RuntimeWarning as e:
-                    print(f"警告发生位置，输入值: {param.value} 减去 {lr * param.grad.value}")
-                    # 添加断点或打印语句
-                    import traceback
+        y_predit = model(x)
 
-                    traceback.print_exc()
-        if i % 100 == 0:
-            print(f"iter {i}, loss: {loss.value:.4f}")
+        loss = abs_loss(y, y_predit)
+
+        loss.backward()  # 损失函数反向传播
+
+        for param in model.params():
+            param.value -= lr * param.grad.value
+
+        model.clear_grad()  # 重置第一层的所有参数的梯度
+
+        if epoch % 100 == 0:  # 每100次，打印输出一下损失值
+            print(f"{epoch}: loss={loss.value:.4f}")
