@@ -513,7 +513,7 @@ class BroadcastTo(Function):
         return np.broadcast_to(input_x, self.target_shape)
 
     def backward(self, input_dy: Variable):
-        sum_to(input_dy, self.original_shape)
+        return sum_to(input_dy, self.original_shape)
 
 
 def broadcast_to(input_x, target_shape):
@@ -544,7 +544,7 @@ class SumTo(Function):
         return util_sum_to(input_x, self.target_shape)
 
     def backward(self, input_dy: Variable):
-        broadcast_to(input_dy, self.original_shape)
+        return broadcast_to(input_dy, self.original_shape)
 
 
 def sum_to(input_x, target_shape):
@@ -836,6 +836,9 @@ class LinearLayer(Layer):
         self.output_size = output_size
         self.need_bias = need_bias
         self.dtype = dtype
+        self.W = Parameter(None, "W")
+        if input_size is not None:
+            self.__init_W()
 
         if need_bias:
             self.b = Parameter(np.zeros(output_size).astype(dtype), "b")
@@ -844,13 +847,14 @@ class LinearLayer(Layer):
 
     def __init_W(self):
         # 使用 Xavier 论文的初始化方式
-        W_init = np.random.randn(self.input_size, self.output_size).astype(self.dtype) * np.sqrt(1.0 / self.input_size)
-        self.W = Parameter(W_init, "W")
+        self.W.value = np.random.randn(self.input_size, self.output_size).astype(self.dtype) * np.sqrt(
+            2.0 / (self.input_size + self.output_size))
 
     def forward(self, input_x):
-        if self.input_size is None:
-            self.input_size = input_x.shape[1]
-        self.__init_W()
+        if self.W.value is None:
+            if self.input_size is None:
+                self.input_size = input_x.shape[1]
+            self.__init_W()
         return linear(input_x, self.W, self.b)
 
 
@@ -870,10 +874,8 @@ class TwoLayerNet(Model):
 
     def forward(self, x):
         temp = self.l1(x)
-        print("第一层的输出维度是: ", temp.shape)
         temp = sigmoid_simple(temp)
         result = self.l2(temp)
-        print("第二层的输出维度是: ", result.shape)
         return result
 
 
@@ -886,8 +888,8 @@ if __name__ == '__main__':
     y = exp(x)  # 真实值
 
     lr = 0.03  # 学习率
-    iters = 100  # 迭代次数
-    hidden_size = 123
+    iters = 10000  # 迭代次数
+    hidden_size = 1
 
     model = TwoLayerNet(hidden_size, output_size=1)
 
@@ -906,3 +908,8 @@ if __name__ == '__main__':
 
         if epoch % 100 == 0:  # 每100次，打印输出一下损失值
             print(f"{epoch}: loss={loss.value:.4f}")
+
+    # 预测
+    test_x = Variable(np.array([1.5]))
+    test_y = model(test_x)
+    print(test_y, np.exp(test_x.value))
