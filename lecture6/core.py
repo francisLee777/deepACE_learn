@@ -1,7 +1,10 @@
 import os
 import subprocess
+import warnings
 import weakref
 
+# 将警告转换为错误，便于定位
+warnings.filterwarnings('error')
 import numpy as np
 
 
@@ -830,7 +833,7 @@ class Layer:
 # 线性层
 class LinearLayer(Layer):
     # input_size 可以不指定，在真正进行前向传播的时候延迟初始化
-    def __init__(self, output_size, input_size=None, need_bias=True, dtype=np.float64):
+    def __init__(self, output_size, input_size=None, need_bias=True, dtype=np.float32):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
@@ -858,7 +861,7 @@ class LinearLayer(Layer):
         return linear(input_x, self.W, self.b)
 
 
-# 基类
+# 模型，基类
 class Model(Layer):
     def plot(self, *inputs, to_file="model.png"):
         y = self.forward(*inputs)
@@ -867,7 +870,7 @@ class Model(Layer):
 
 # 两层线性网络模型
 class TwoLayerNet(Model):
-    def __init__(self, hidden_size, output_size, dtype=np.float64):
+    def __init__(self, hidden_size, output_size, dtype=np.float32):
         super().__init__()
         self.l1 = LinearLayer(hidden_size, dtype=dtype)
         self.l2 = LinearLayer(output_size, dtype=dtype)
@@ -879,37 +882,117 @@ class TwoLayerNet(Model):
         return result
 
 
+# 任意N层网络模型，即 MLP 模型
+class MultiLayerNet(Model):
+    # 初始化，hidden_size 是一个列表，每个元素是隐藏层的神经元数量
+    def __init__(self, hidden_size, output_size, dtype=np.float32):
+        super().__init__()
+        self.layers = []
+        for i in range(len(hidden_size)):
+            self.layers.append(LinearLayer(hidden_size[i], dtype=dtype))
+            self.layers.append(sigmoid_simple)
+        # 最后一层的输出形状是 output_size
+        self.layers.append(LinearLayer(output_size, dtype=dtype))
+
+    def forward(self, x):
+        # 最后一层不需要激活函数，所以循环到倒数第二层
+        for layer in self.layers[:-1]:
+            x = layer(x)
+            x = sigmoid_simple(x)
+            # 最后一层是输出层，不需要激活函数
+        return self.layers[-1](x)
+
+
 #  ——————————————————————— end 参数,层,网络模型等高层概念  —————————————————————————
 
 
 if __name__ == '__main__':
+
+    # 单层网络训练
+    def train_single_layer_net(x, y, lr, iters, output_size, loss_func):
+        model = LinearLayer(output_size)
+        lastLoss = Variable(np.array(0))
+        for epoch in range(iters):
+            y_predit = model(x)
+            loss = loss_func(y, y_predit)
+            loss.backward()  # 损失函数反向传播
+            # 更新参数
+            for param in model.params():
+                param.value -= lr * param.grad.value
+            model.clear_grad()
+            # # 打印损失值
+            # if epoch % 100 == 0:
+            #     print(f"{epoch}: loss={loss.value:.4f}")
+            lastLoss = loss.value
+
+        # 打印最后的损失值
+        print(f"单层模型的最终损失值是 {lastLoss:.4f}")
+        return model
+
+
+    # 双层网络训练, 多了一个 hidden_size 参数
+    def train_two_layer_net(x, y, lr, iters, hidden_size, output_size, loss_func):
+        model = TwoLayerNet(hidden_size, output_size)
+        lastLoss = Variable(np.array(0))
+        for epoch in range(iters):
+            y_predit = model(x)
+            loss = loss_func(y, y_predit)
+            loss.backward()  # 损失函数反向传播
+            # 更新参数
+            for param in model.params():
+                param.value -= lr * param.grad.value
+            model.clear_grad()
+            # # 打印损失值
+            # if epoch % 100 == 0:
+            #     print(f"{epoch}: loss={loss.value:.4f}")
+            lastLoss = loss.value
+        # 打印最后的损失值
+        print(f"双层模型的最终损失值是 {lastLoss:.4f}")
+        return model
+
+
+    # 多层网络[MLP]，多了一个 hidden_sizes 参数，是一个列表，每个元素是隐藏层的神经元数量
+    def train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, loss_func):
+        model = MultiLayerNet(hidden_sizes, output_size)
+        lastLoss = Variable(np.array(0))
+        for epoch in range(iters):
+            y_predit = model(x)
+            loss = loss_func(y, y_predit)
+            loss.backward()  # 损失函数反向传播
+            # 更新参数
+            for param in model.params():
+                param.value -= lr * param.grad.value
+            model.clear_grad()
+            # # 打印损失值
+            # if epoch % 100 == 0:
+            #     print(f"{epoch}: loss={loss.value:.4f}")
+            lastLoss = loss.value
+        # 打印最后的损失值
+        print(f"多层模型的最终损失值是 {lastLoss:.4f}")
+        return model
+
+
     # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
     x = Variable(np.linspace(0, 3, 100).reshape(100, 1))  # (100, 1)
     y = exp(x)  # 真实值
 
     lr = 0.03  # 学习率
-    iters = 10000  # 迭代次数
-    hidden_size = 1
+    iters = 5000  # 迭代次数
+    hidden_size = 50  # 双层网络时，中间隐藏层的神经元数量
+    hidden_sizes = [hidden_size, hidden_size]  # 多层网络时，每个隐藏层的神经元数量，例如这里3层
+    output_size = 1
 
-    model = TwoLayerNet(hidden_size, output_size=1)
-
-    for epoch in range(iters):
-
-        y_predit = model(x)
-
-        loss = abs_loss(y, y_predit)
-
-        loss.backward()  # 损失函数反向传播
-
-        for param in model.params():
-            param.value -= lr * param.grad.value
-
-        model.clear_grad()  # 重置第一层的所有参数的梯度
-
-        if epoch % 100 == 0:  # 每100次，打印输出一下损失值
-            print(f"{epoch}: loss={loss.value:.4f}")
+    # 分别使用单层/双层/多层网络进行训练， 对比效果
+    model_1_trained = train_single_layer_net(x, y, lr, iters, output_size, abs_loss)
+    model_2_trained = train_two_layer_net(x, y, lr, iters, hidden_size, output_size, abs_loss)
+    model_3_trained = train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, abs_loss)
 
     # 预测
     test_x = Variable(np.array([1.5]))
-    test_y = model(test_x)
-    print(test_y, np.exp(test_x.value))
+    y_predit_1 = model_1_trained(test_x)  # 模型1的预测值
+    y_predit_2 = model_2_trained(test_x)  # 模型2的预测值
+    y_predit_3 = model_3_trained(test_x)  # 模型3的预测值
+    y = exp(test_x)  # 真实值
+    print(f"单层模型预测的结果是 {y_predit_1.value} 真实值 {y.value}")
+    print(f"双层模型预测的结果是 {y_predit_2.value} 真实值 {y.value}")
+    print(f"多层模型预测的结果是 {y_predit_3.value} 真实值 {y.value}")
