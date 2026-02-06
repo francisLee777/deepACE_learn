@@ -66,6 +66,9 @@ class Variable:
     def __rmul__(self, other):
         return mul(other, self)
 
+    def __getitem__(self, item):
+        return get_item(self, item)
+
     def __matmul__(self, other):
         return matmul(self, other)
 
@@ -837,7 +840,8 @@ class Layer:
                 for item in obj.values():
                     yield from _yield_params(item)
             if isinstance(obj, (list, tuple, set)):
-                yield from _yield_params(obj)
+                for item in obj:
+                    yield from _yield_params(item)
 
         for name, obj in self.__dict__.items():
             if name == '_params_name':
@@ -910,7 +914,6 @@ class MultiLayerNet(Model):
         self.layers = []
         for i in range(len(hidden_size)):
             self.layers.append(LinearLayer(hidden_size[i], dtype=dtype))
-            self.layers.append(sigmoid_simple)
         # 最后一层的输出形状是 output_size
         self.layers.append(LinearLayer(output_size, dtype=dtype))
 
@@ -925,94 +928,194 @@ class MultiLayerNet(Model):
 
 #  ——————————————————————— end 参数,层,网络模型等高层概念  —————————————————————————
 
+class Optimizer:
+    def __init__(self, model):
+        self.target = model  # 也可以传入 Layer 类
+        self.hooks = []  # 钩子函数[可选]
 
-if __name__ == '__main__':
+    def add_hook(self, hook):
+        self.hooks.append(hook)
 
-    # 单层网络训练
-    def train_single_layer_net(x, y, lr, iters, output_size, loss_func):
-        model = LinearLayer(output_size)
-        lastLoss = Variable(np.array(0))
-        for epoch in range(iters):
-            y_predit = model(x)
-            loss = loss_func(y, y_predit)
-            loss.backward()  # 损失函数反向传播
-            # 更新参数
-            for param in model.params():
-                param.value -= lr * param.grad.value
-            model.clear_grad()
-            # # 打印损失值
-            # if epoch % 100 == 0:
-            #     print(f"{epoch}: loss={loss.value:.4f}")
-            lastLoss = loss.value
+    def update(self):
+        params = self.target.params()
+        # 过滤掉梯度为 None 的参数
+        params = [p for p in params if p.grad is not None]
 
-        # 打印最后的损失值
-        print(f"单层模型的最终损失值是 {lastLoss:.4f}")
-        return model
+        # 调用钩子函数[可选]，可用于权重衰减、梯度裁剪等工作
+        for hook in self.hooks:
+            hook(params)
 
+        # 逐个更新参数
+        for param in params:
+            self.update_one(param)
 
-    # 双层网络训练, 多了一个 hidden_size 参数
-    def train_two_layer_net(x, y, lr, iters, hidden_size, output_size, loss_func):
-        model = TwoLayerNet(hidden_size, output_size)
-        lastLoss = Variable(np.array(0))
-        for epoch in range(iters):
-            y_predit = model(x)
-            loss = loss_func(y, y_predit)
-            loss.backward()  # 损失函数反向传播
-            # 更新参数
-            for param in model.params():
-                param.value -= lr * param.grad.value
-            model.clear_grad()
-            # # 打印损失值
-            # if epoch % 100 == 0:
-            #     print(f"{epoch}: loss={loss.value:.4f}")
-            lastLoss = loss.value
-        # 打印最后的损失值
-        print(f"双层模型的最终损失值是 {lastLoss:.4f}")
-        return model
+    # 每个参数的更新方法，需要在子类中实现
+    def update_one(self, param):
+        raise NotImplementedError()
 
 
-    # 多层网络[MLP]，多了一个 hidden_sizes 参数，是一个列表，每个元素是隐藏层的神经元数量
-    def train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, loss_func):
-        model = MultiLayerNet(hidden_sizes, output_size)
-        lastLoss = Variable(np.array(0))
-        for epoch in range(iters):
-            y_predit = model(x)
-            loss = loss_func(y, y_predit)
-            loss.backward()  # 损失函数反向传播
-            # 更新参数
-            for param in model.params():
-                param.value -= lr * param.grad.value
-            model.clear_grad()
-            # # 打印损失值
-            if epoch % 100 == 0:
-                print(f"{epoch}: loss={loss.value:.4f}")
-            lastLoss = loss.value
-        # 打印最后的损失值
-        print(f"多层模型的最终损失值是 {lastLoss:.4f}")
-        return model
+# 梯度下降类
+class SGD(Optimizer):
+    def __init__(self, model, lr=0.01):
+        super().__init__(model)
+        self.lr = lr
+
+    def update_one(self, param):
+        param.value -= self.lr * param.grad.value
 
 
-    # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
-    x = Variable(np.linspace(0, 3, 100).reshape(100, 1))  # (100, 1)
-    y = exp(x)  # 真实值
+class Momentum(Optimizer):
+    def __init__(self, model, lr=0.01, momentum=0.9):
+        super().__init__(model)
+        self.lr = lr
+        self.momentum = momentum
+        self.v = {}  # 保存每个参数的动量项
 
-    lr = 0.03  # 学习率
-    iters = 5000  # 迭代次数
-    hidden_size = 50  # 双层网络时，中间隐藏层的神经元数量
-    hidden_sizes = [hidden_size, hidden_size]  # 多层网络时，每个隐藏层的神经元数量，例如这里3层
-    output_size = 1
+    def update_one(self, param):
+        if param.grad is None:
+            return
 
-    # 分别使用单层/双层/多层网络进行训练， 对比效果
-    model_1_trained = train_single_layer_net(x, y, lr, iters, output_size, abs_loss)
-    model_2_trained = train_two_layer_net(x, y, lr, iters, hidden_size, output_size, abs_loss)
-    model_3_trained = train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, abs_loss)
+        grad = param.grad.value
 
-    # 预测
-    test_x = Variable(np.array([1.5]))
-    y_predit_1 = model_1_trained(test_x)  # 模型1的预测值
-    y_predit_2 = model_2_trained(test_x)  # 模型2的预测值
-    y_predit_3 = model_3_trained(test_x)  # 模型3的预测值
-    y = exp(test_x)  # 真实值
-    print(f"单层模型预测的结果是 {y_predit_1.value} 真实值 {y.value}")
-    print(f"双层模型预测的结果是 {y_predit_2.value} 真实值 {y.value}")
-    print(f"多层模型预测的结果是 {y_predit_3.value} 真实值 {y.value}")
+        # 初始化动量
+        if param not in self.v:
+            self.v[param] = np.zeros_like(grad)
+
+        v = self.v[param]
+
+        # 计算动量更新
+        v[:] = self.momentum * v - self.lr * grad
+
+        # 参数更新
+        param.value += v
+
+
+def softmax_simple(x, axis=1):
+    x = as_variable(x)
+    y = exp(x)
+    sum_y = sum(y, axis=axis, keepdims=True)
+    return y / sum_y
+
+
+class GetItem(Function):
+    def __init__(self, slices):
+        self.slices = slices
+        self.x_shape = None
+
+    def forward(self, x):
+        self.x_shape = x.shape
+        y = x[self.slices]
+        return y
+
+    def backward(self, dy):
+        # 构造一个与原始输入相同形状的 0 数组
+        dx = np.zeros(self.x_shape, dtype=dy.dtype)
+        # np.add.at 可以实现“稀疏加法”（用于切片梯度还原）
+        np.add.at(dx, self.slices, dy.value)
+        # 最终要返回 Variable 对象
+        return Variable(dx)
+
+
+def get_item(x, slices):
+    return GetItem(slices)(x)
+
+
+class Clip(Function):
+    def __init__(self, x_min, x_max):
+        self.x_min = x_min
+        self.x_max = x_max
+
+    def forward(self, x):
+        return np.clip(x, self.x_min, self.x_max)
+
+    def backward(self, dy):
+        (x,) = self.input_variable
+        mask = (x.value >= self.x_min) * (x.value <= self.x_max)
+        dx = dy * mask
+        return dx
+
+
+def clip(x, x_min, x_max):
+    return Clip(x_min, x_max)(x)
+
+
+def softmax_cross_entropy_simple(x, t):
+    x, t = as_variable(x), as_variable(t)
+    N = x.shape[0]  # 一般 x 的第一个维度是批量数据个数 batch size
+    p = softmax_simple(x)
+    p = clip(p, 1e-15, 1.0)  # 防止0和1溢出问题
+    log_p = log(p)
+    tlog_p = log_p[np.arange(N), t.value]
+    return -1 * sum(tlog_p) / N
+
+
+class Softmax(Function):
+    def __init__(self, axis=1):
+        self.axis = axis
+
+    def forward(self, x):
+        # 防止数据溢出，进行缩放
+        x_shift = x - x.max(axis=self.axis, keepdims=True)
+        y = np.exp(x_shift)
+        y /= y.sum(axis=self.axis, keepdims=True)
+        return y
+
+    def backward(self, dy):
+        y = self.output_variable[0]
+        dx = y * dy
+        sum_dx = dx.sum(axis=self.axis, keepdims=True)
+        dx -= y * sum_dx
+        return dx
+
+
+def softmax(x, axis=1):
+    return Softmax(axis)(x)
+
+
+# 使用另一种计算方式。是数学上最稳定的表达形式，避免任何溢出或 underflow。
+def logsumexp(x, axis=1):
+    m = x.max(axis=axis, keepdims=True)
+    y = x - m
+    np.exp(y, out=y)
+    s = y.sum(axis=axis, keepdims=True)
+    np.log(s, out=s)
+    m += s
+    return m
+
+
+class SoftmaxCrossEntropy(Function):
+    def forward(self, x, t):
+        N = x.shape[0]
+        log_z = logsumexp(x, axis=1)
+        log_p = x - log_z
+        log_p = log_p[np.arange(N), t.ravel()]
+        y = -log_p.sum() / np.float32(N)
+        return y
+
+    def backward(self, dy):
+        # 反向传播： dL/dx = (y - one_hot(t)) / N
+        # 拿到保存的值
+        x, t = self.input_variable
+        N, _ = x.shape
+
+        dy *= 1 / N
+        y = softmax(x)
+
+        # 构造 one-hot
+        one_hot = np.zeros_like(y, dtype=np.float32)
+        one_hot[np.arange(N), t.value] = 1
+        # softmax + crossentropy 的合成梯度
+        y = (y - one_hot) * dy
+        # 这个Node是指 t 无需梯度，因为t是标签，不是中间变量。如果没有None的话导致框架后续逻辑不兼容
+        return y, None
+
+
+def softmax_cross_entropy(x, t):
+    return SoftmaxCrossEntropy()(x, t)
+
+
+if __name__ == "__main__":
+    a = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
+    y = a[1]
+    y.backward()
+    print(y, a.grad)  # variable([4 5 6]) [[0 0 0] [1 1 1]]
