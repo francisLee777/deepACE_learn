@@ -1,11 +1,29 @@
+import functools
 import os
 import subprocess
-import warnings
 import weakref
 
 # 将警告转换为错误，便于定位
-warnings.filterwarnings('error')
 import numpy as np
+
+
+# 推荐配置：
+# 1. invalid (无效计算，如 sqrt(-1)): 报错 (raise)
+# 2. divide (除零): 报错 (raise) 或 警告 (warn)
+# 3. over (溢出，数太大): 警告 (warn) 或 报错 (raise)
+# 4. underflow (下溢，数太小): 忽略 (ignore) -> 这是屏蔽 Accelerate 噪音的关键！
+
+
+# 定义一个装饰器，专门用于执行线性代数运算。解决 MacOS numpy 使用底层 Accelerate 库导致的各种假溢出问题。
+def safe_linalg(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # 临时允许下溢和溢出，但保持对 NaN 的警惕
+        with np.errstate(under='ignore', divide='ignore', over='ignore',
+                         invalid='ignore'):  # np.seterr(invalid='raise', divide='raise', over='warn', under='ignore')
+            return func(*args, **kwargs)
+
+    return wrapper
 
 
 class Variable:
@@ -435,7 +453,8 @@ def log(x):
 
 class MatMul(Function):
     def forward(self, input_x, input_W):
-        return input_x @ input_W
+        with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+            return input_x @ input_W
 
     def backward(self, input_dy: Variable):
         input_x, input_W = self.input_variable
@@ -672,6 +691,7 @@ def numerical_gradient_matrix_w(f, x, W, eps=1e-4):
 #  ———————————————————————— start 基础的深度学习网络组件  ——————————————————————————————
 
 class Linear(Function):
+    @safe_linalg
     def forward(self, x, W, b):
         y = x @ W
         if b is not None:  # 偏置，是可选项
@@ -877,7 +897,7 @@ class TwoLayerNet(Model):
 
     def forward(self, x):
         temp = self.l1(x)
-        temp = sigmoid_simple(temp)
+        temp = sigmoid(temp)
         result = self.l2(temp)
         return result
 
@@ -890,7 +910,6 @@ class MultiLayerNet(Model):
         self.layers = []
         for i in range(len(hidden_size)):
             self.layers.append(LinearLayer(hidden_size[i], dtype=dtype))
-            self.layers.append(sigmoid_simple)
         # 最后一层的输出形状是 output_size
         self.layers.append(LinearLayer(output_size, dtype=dtype))
 
@@ -898,7 +917,7 @@ class MultiLayerNet(Model):
         # 最后一层不需要激活函数，所以循环到倒数第二层
         for layer in self.layers[:-1]:
             x = layer(x)
-            x = sigmoid_simple(x)
+            x = sigmoid(x)
             # 最后一层是输出层，不需要激活函数
         return self.layers[-1](x)
 
@@ -936,7 +955,7 @@ if __name__ == '__main__':
         lastLoss = Variable(np.array(0))
         for epoch in range(iters):
             y_predit = model(x)
-            loss = loss_func(y, y_predit)
+            loss = loss_func(y, y_predit)  # 标量
             loss.backward()  # 损失函数反向传播
             # 更新参数
             for param in model.params():
@@ -972,13 +991,13 @@ if __name__ == '__main__':
         return model
 
 
-    # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
+    # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量    100是数据量   1数据的特征维度
     x = Variable(np.linspace(0, 3, 100).reshape(100, 1))  # (100, 1)
     y = exp(x)  # 真实值
 
     lr = 0.03  # 学习率
     iters = 5000  # 迭代次数
-    hidden_size = 50  # 双层网络时，中间隐藏层的神经元数量
+    hidden_size = 10  # 双层网络时，中间隐藏层的神经元数量
     hidden_sizes = [hidden_size, hidden_size]  # 多层网络时，每个隐藏层的神经元数量，例如这里3层
     output_size = 1
 

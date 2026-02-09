@@ -1,7 +1,13 @@
+import math
 import os
 import subprocess
+import warnings
 import weakref
 
+from matplotlib import pyplot as plt
+
+# 将警告转换为错误，便于定位
+warnings.filterwarnings('error')
 import numpy as np
 
 
@@ -713,6 +719,48 @@ def abs_loss(x0, x1):
     return sum(diff) / len(diff)  # 除以样本数量, 防止误差过大溢出以及学习率无法调整
 
 
+class GetItem(Function):
+    def __init__(self, slices):
+        self.slices = slices
+        self.x_shape = None
+
+    def forward(self, x):
+        self.x_shape = x.shape
+        y = x[self.slices]
+        return y
+
+    def backward(self, dy):
+        # 构造一个与原始输入相同形状的 0 数组
+        dx = np.zeros(self.x_shape, dtype=dy.dtype)
+        # np.add.at 可以实现“稀疏加法”（用于切片梯度还原）
+        np.add.at(dx, self.slices, dy.value)
+        # 最终要返回 Variable 对象
+        return Variable(dx)
+
+
+def get_item(x, slices):
+    return GetItem(slices)(x)
+
+
+class Clip(Function):
+    def __init__(self, x_min, x_max):
+        self.x_min = x_min
+        self.x_max = x_max
+
+    def forward(self, x):
+        return np.clip(x, self.x_min, self.x_max)
+
+    def backward(self, dy):
+        (x,) = self.input_variable
+        mask = (x.value >= self.x_min) * (x.value <= self.x_max)
+        dx = dy * mask
+        return dx
+
+
+def clip(x, x_min, x_max):
+    return Clip(x_min, x_max)(x)
+
+
 #  ———————————————————————— end 基础的深度学习网络组件  ——————————————————————————————
 
 #  ———————————————————————— start 计算图构建工具，输出png  ———————————————————————————
@@ -850,6 +898,20 @@ class Layer:
         for param in self.params():
             param.clear_grad()
 
+    # 打平参数
+    def _flatten_params(self, params_dict, parent_key=""):
+        for name in self._params_name:
+            # __dict__ 是类的属性字典，包含了类的所有属性，包括实例属性和类属性
+            obj = self.__dict__[name]
+
+            # key 的设计是支持嵌套的，例如：layer1/W 表示 layer1 层的权重参数 W
+            key = parent_key + '/' + name if parent_key else name
+            # 如果是 Layer 类型，递归调用 _flatten_params 方法，最终都将参数加入到 params_dict 中
+            if isinstance(obj, Layer):
+                obj._flatten_params(params_dict, key)
+            else:
+                params_dict[key] = obj
+
 
 # 线性层
 class LinearLayer(Layer):
@@ -906,11 +968,11 @@ class TwoLayerNet(Model):
 # 任意N层网络模型，即 MLP 模型
 class MultiLayerNet(Model):
     # 初始化，hidden_size 是一个列表，每个元素是隐藏层的神经元数量
-    def __init__(self, hidden_size, output_size, dtype=np.float32):
+    def __init__(self, hidden_sizes, output_size, dtype=np.float32):
         super().__init__()
         self.layers = []
-        for i in range(len(hidden_size)):
-            self.layers.append(LinearLayer(hidden_size[i], dtype=dtype))
+        for i in range(len(hidden_sizes)):
+            self.layers.append(LinearLayer(hidden_sizes[i], dtype=dtype))
         # 最后一层的输出形状是 output_size
         self.layers.append(LinearLayer(output_size, dtype=dtype))
 
@@ -925,6 +987,8 @@ class MultiLayerNet(Model):
 
 #  ——————————————————————— end 参数,层,网络模型等高层概念  —————————————————————————
 
+
+#  ———————————————————————    start 优化器    —————————————————————————
 class Optimizer:
     def __init__(self, model):
         self.target = model  # 也可以传入 Layer 类
@@ -987,53 +1051,13 @@ class Momentum(Optimizer):
         param.value += v
 
 
+#  ———————————————————————    end 优化器    —————————————————————————
+
 def softmax_simple(x, axis=1):
     x = as_variable(x)
     y = exp(x)
     sum_y = sum(y, axis=axis, keepdims=True)
     return y / sum_y
-
-
-class GetItem(Function):
-    def __init__(self, slices):
-        self.slices = slices
-        self.x_shape = None
-
-    def forward(self, x):
-        self.x_shape = x.shape
-        y = x[self.slices]
-        return y
-
-    def backward(self, dy):
-        # 构造一个与原始输入相同形状的 0 数组
-        dx = np.zeros(self.x_shape, dtype=dy.dtype)
-        # np.add.at 可以实现“稀疏加法”（用于切片梯度还原）
-        np.add.at(dx, self.slices, dy.value)
-        # 最终要返回 Variable 对象
-        return Variable(dx)
-
-
-def get_item(x, slices):
-    return GetItem(slices)(x)
-
-
-class Clip(Function):
-    def __init__(self, x_min, x_max):
-        self.x_min = x_min
-        self.x_max = x_max
-
-    def forward(self, x):
-        return np.clip(x, self.x_min, self.x_max)
-
-    def backward(self, dy):
-        (x,) = self.input_variable
-        mask = (x.value >= self.x_min) * (x.value <= self.x_max)
-        dx = dy * mask
-        return dx
-
-
-def clip(x, x_min, x_max):
-    return Clip(x_min, x_max)(x)
 
 
 def softmax_cross_entropy_simple(x, t):
@@ -1111,5 +1135,206 @@ def softmax_cross_entropy(x, t):
     return SoftmaxCrossEntropy()(x, t)
 
 
+#  ———————————————————————    start 数据集和加载器相关    —————————————————————————
+
+class Dataset:
+    def __init__(self, is_train=True, y_transform=None, t_transform=None):
+        self.is_train = is_train
+        self.y_transform = y_transform  # 样本预处理函数，可为 None
+        self.t_transform = t_transform  # 标签预处理函数，可为 None
+
+        self.data = None
+        self.label = None
+        self.prepare()
+
+    def __getitem__(self, index):
+        assert np.isscalar(index)
+        y = self.data[index]
+        t = None if self.label is None else self.label[index]
+        # 延迟 transform 判断（只有在存在时才调用）
+        if self.y_transform:
+            y = self.y_transform(y)
+        if self.t_transform and t is not None:
+            t = self.t_transform(t)
+        return y, t
+
+    def __len__(self):
+        return len(self.data)
+
+    def prepare(self):
+        """由子类实现：生成或加载数据"""
+        pass
+
+
+def get_example_data(is_train=True):
+    # 测试数据集和训练数据集的随机种子不同，用来模拟。
+    np.random.seed(seed=(1 if is_train else 2))
+    num_data, num_class, input_dim = 1000, 3, 2
+    data_size = num_class * num_data
+    x = np.zeros((data_size, input_dim), dtype=np.float32)
+    t = np.zeros(data_size, dtype=np.int32)  # 标签，每个类别对应一个整数
+
+    for j in range(num_class):
+        for i in range(num_data):
+            rate = i / num_data
+            radius = 1.0 * rate
+            theta = j * 4.0 + 4.0 * rate + np.random.randn() * 0.2
+            ix = num_data * j + i
+            x[ix] = np.array([radius * np.sin(theta), radius * np.cos(theta)]).flatten()
+            t[ix] = j
+    # Shuffle, 随机打乱数据
+    indices = np.random.permutation(num_data * num_class)
+    x = x[indices]  # 用于输入数据集，每个类别对应一个整数
+    t = t[indices]  # 标签数据集，每个类别对应一个整数
+
+    # 附，可用于绘图
+    # plt.figure(figsize=(6, 6))
+    # # 不同类别使用不同颜色
+    # for i in range(3):
+    #     plt.scatter(x[t == i, 0], x[t == i, 1], label=f"Class {i}", s=20)
+    # plt.legend()
+    # plt.xlabel("x1")
+    # plt.ylabel("x2")
+    # plt.show()
+
+    return x, t
+
+
+class ThreeClassDataset(Dataset):
+    def prepare(self):
+        # 数据的缩放
+        self.data, self.label = get_example_data(self.is_train)
+
+
+def accuracy(y, t):
+    y, t = as_variable(y), as_variable(t)
+    # 预测值中概率最大的类别，构成与标签相同的形状
+    pred = y.value.argmax(axis=1).reshape(t.shape)
+    result = pred == t.value  # 预测值与标签值相等的位置为True，否则为False
+    acc = result.mean()  # 计算准确率，即正确预测的样本数占总样本数的比例
+    return Variable(as_array(acc))
+
+
+class DataLoader:
+    def __init__(self, dataset, batch_size, shuffle=True):
+        self.dataset = dataset  # 原始数据集
+        self.iteration = 0  # 当前迭代次数
+        self.index = None  # 当前批次的样本索引
+        self.batch_size = batch_size  # 每个批次的样本数量
+        self.shuffle = shuffle  # 是否在每个 epoch 开始时打乱数据索引
+        self.data_size = len(dataset)
+        # 每个 epoch 中，迭代的最大次数
+        self.max_iter = math.ceil(self.data_size / batch_size)
+        self.reset()
+
+    # 重置迭代器，将迭代次数设为0，根据shuffle参数是否为True，重新设置样本索引
+    def reset(self):
+        self.iteration = 0
+        if self.shuffle:
+            self.index = np.random.permutation(len(self.dataset))
+        else:
+            self.index = np.arange(len(self.dataset))
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.iteration >= self.max_iter:
+            self.reset()
+            raise StopIteration
+
+        i, batch_size = self.iteration, self.batch_size
+        batch_index = self.index[i * batch_size: (i + 1) * batch_size]
+        batch = [self.dataset[i] for i in batch_index]
+
+        x = np.array([example[0] for example in batch])
+        t = np.array([example[1] for example in batch])
+
+        self.iteration += 1
+        return x, t
+
+    def next(self):
+        return self.__next__()
+
+
+#  ———————————————————————    end 数据集和加载器相关    —————————————————————————
+
 if __name__ == '__main__':
-    pass
+    max_epoch = 50  # 最大训练轮数
+    batch_size = 30  # 每个批次的样本数量
+    hidden_size = 10  # 隐藏层神经元数量
+    lr = 1.0  # 学习率
+
+    # 使用 DataLoader 进行训练
+    train_set = ThreeClassDataset(is_train=True)
+    test_set = ThreeClassDataset(is_train=False)
+
+    train_loader = DataLoader(train_set, batch_size)
+    test_loader = DataLoader(test_set, batch_size, shuffle=False)
+
+    model = MultiLayerNet((hidden_size,), 3)
+    optimizer = SGD(model, lr)
+
+    # for 数据可视化
+    train_loss_list, test_loss_list = [], []
+    train_acc_list, test_acc_list = [], []
+
+    for epoch in range(max_epoch):
+        sum_loss, sum_acc = 0, 0
+        # 训练
+        for x, t in train_loader:
+            y = model(x)
+            loss = softmax_cross_entropy(y, t)
+            model.clear_grad()
+            loss.backward()
+            optimizer.update()
+            acc = accuracy(y, t)
+            sum_loss += float(loss.value) * len(t)
+            sum_acc += float(acc.value) * len(t)
+
+        print("epoch: {}".format(epoch + 1))
+        print("train loss: {:.4f}, accuracy: {:.4f}".format(sum_loss / len(train_set), sum_acc / len(train_set)))
+
+        # 每一轮训练结束后，使用测试集评估模型性能
+        sum_loss_test, sum_acc_test = 0, 0
+        for x, t in test_loader:
+            y = model(x)
+            loss = softmax_cross_entropy(y, t)
+            acc = accuracy(y, t)
+            sum_loss_test += float(loss.value) * len(t)
+            sum_acc_test += float(acc.value) * len(t)
+
+        print("test loss: {:.4f}, accuracy: {:.4f}".format(sum_loss_test / len(test_set), sum_acc_test / len(test_set)))
+
+        # ======= 保存数据用于可视化 =======
+        train_loss_list.append(sum_loss / len(train_set))
+        test_loss_list.append(sum_loss_test / len(test_set))
+        train_acc_list.append(sum_acc / len(train_set))
+        test_acc_list.append(sum_acc_test / len(test_set))
+
+    # ======= 绘图 =======
+    epochs = range(1, max_epoch + 1)
+    plt.figure(figsize=(12, 5))
+
+    # --- loss 曲线 ---
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, train_loss_list, label="Train Loss")
+    plt.plot(epochs, test_loss_list, label="Test Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training vs Test Loss")
+    plt.legend()
+    plt.grid(True)
+
+    # --- acc 曲线 ---
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, train_acc_list, label="Train Accuracy")
+    plt.plot(epochs, test_acc_list, label="Test Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Training vs Test Accuracy")
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
