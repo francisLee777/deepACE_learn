@@ -7,25 +7,6 @@ import weakref
 import numpy as np
 
 
-# 推荐配置：
-# 1. invalid (无效计算，如 sqrt(-1)): 报错 (raise)
-# 2. divide (除零): 报错 (raise) 或 警告 (warn)
-# 3. over (溢出，数太大): 警告 (warn) 或 报错 (raise)
-# 4. underflow (下溢，数太小): 忽略 (ignore) -> 这是屏蔽 Accelerate 噪音的关键！
-
-
-# 定义一个装饰器，专门用于执行线性代数运算。解决 MacOS numpy 使用底层 Accelerate 库导致的各种假溢出问题。
-def safe_linalg(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        # 临时允许下溢和溢出，但保持对 NaN 的警惕
-        with np.errstate(under='ignore', divide='ignore', over='ignore',
-                         invalid='ignore'):  # np.seterr(invalid='raise', divide='raise', over='warn', under='ignore')
-            return func(*args, **kwargs)
-
-    return wrapper
-
-
 class Variable:
     __array_priority__ = 999
 
@@ -691,7 +672,6 @@ def numerical_gradient_matrix_w(f, x, W, eps=1e-4):
 #  ———————————————————————— start 基础的深度学习网络组件  ——————————————————————————————
 
 class Linear(Function):
-    @safe_linalg
     def forward(self, x, W, b):
         y = x @ W
         if b is not None:  # 偏置，是可选项
@@ -821,8 +801,18 @@ class Layer:
 
     # 特殊方法，在设置字段值的时候，会调用这个函数
     def __setattr__(self, name, value):
-        # 只搜集 Parameter/Layer 类，不搜集 Variable 类和其他类型
-        if isinstance(value, (Parameter, Layer)):
+        # 主要用来支持集合类型中的 Parameter/Layer 判断
+        def _contains_param(v):
+            # 只搜集 Parameter/Layer 类，不搜集 Variable 类和其他类型
+            if isinstance(v, (Parameter, Layer)):
+                return True
+            if isinstance(v, (list, tuple, set)):
+                return any(_contains_param(item) for item in v)
+            if isinstance(v, dict):
+                return any(_contains_param(item) for item in v.values())
+            return False
+
+        if name != '_params_name' and hasattr(self, '_params_name') and _contains_param(value):
             self._params_name.add(name)
         super().__setattr__(name, value)
 
@@ -837,13 +827,24 @@ class Layer:
         return outputs if len(outputs) > 1 else outputs[0]
 
     def params(self):
-        for name in self._params_name:
-            # __dict__ 对象中所有存储的字段
-            obj = self.__dict__[name]
+        # 定义一个函数，用来递归地获取所有的 Parameter/Layer 类
+        def _yield_params(obj):
+            if isinstance(obj, Parameter):
+                yield obj
             if isinstance(obj, Layer):
                 yield from obj.params()
-            else:
-                yield obj  # 逐个返回
+            if isinstance(obj, dict):
+                for item in obj.values():
+                    yield from _yield_params(item)
+            if isinstance(obj, (list, tuple, set)):
+                for item in obj:
+                    yield from _yield_params(item)
+
+        for name, obj in self.__dict__.items():
+            if name == '_params_name':
+                continue
+            if obj is not None:
+                yield from _yield_params(obj)
 
     def clear_grad(self):
         for param in self.params():
@@ -923,6 +924,191 @@ class MultiLayerNet(Model):
 
 
 #  ——————————————————————— end 参数,层,网络模型等高层概念  —————————————————————————
+
+class Optimizer:
+    def __init__(self, model):
+        self.target = model  # 也可以传入 Layer 类
+        self.hooks = []  # 钩子函数[可选]
+
+    def add_hook(self, hook):
+        self.hooks.append(hook)
+
+    def update(self):
+        params = self.target.params()
+        # 过滤掉梯度为 None 的参数
+        params = [p for p in params if p.grad is not None]
+
+        # 调用钩子函数[可选]，可用于权重衰减、梯度裁剪等工作
+        for hook in self.hooks:
+            hook(params)
+
+        # 逐个更新参数
+        for param in params:
+            self.update_one(param)
+
+    # 每个参数的更新方法，需要在子类中实现
+    def update_one(self, param):
+        raise NotImplementedError()
+
+
+# 梯度下降类
+class SGD(Optimizer):
+    def __init__(self, model, lr=0.01):
+        super().__init__(model)
+        self.lr = lr
+
+    def update_one(self, param):
+        param.value -= self.lr * param.grad.value
+
+
+class Momentum(Optimizer):
+    def __init__(self, model, lr=0.01, momentum=0.9):
+        super().__init__(model)
+        self.lr = lr
+        self.momentum = momentum
+        self.v = {}  # 保存每个参数的动量项
+
+    def update_one(self, param):
+        if param.grad is None:
+            return
+
+        grad = param.grad.value
+
+        # 初始化动量
+        if param not in self.v:
+            self.v[param] = np.zeros_like(grad)
+
+        v = self.v[param]
+
+        # 计算动量更新
+        v[:] = self.momentum * v - self.lr * grad
+
+        # 参数更新
+        param.value += v
+
+
+def softmax_simple(x, axis=1):
+    x = as_variable(x)
+    y = exp(x)
+    sum_y = sum(y, axis=axis, keepdims=True)
+    return y / sum_y
+
+
+class GetItem(Function):
+    def __init__(self, slices):
+        self.slices = slices
+        self.x_shape = None
+
+    def forward(self, x):
+        self.x_shape = x.shape
+        y = x[self.slices]
+        return y
+
+    def backward(self, dy):
+        # 构造一个与原始输入相同形状的 0 数组
+        dx = np.zeros(self.x_shape, dtype=dy.dtype)
+        # np.add.at 可以实现“稀疏加法”（用于切片梯度还原）
+        np.add.at(dx, self.slices, dy.value)
+        # 最终要返回 Variable 对象
+        return Variable(dx)
+
+
+def get_item(x, slices):
+    return GetItem(slices)(x)
+
+
+class Clip(Function):
+    def __init__(self, x_min, x_max):
+        self.x_min = x_min
+        self.x_max = x_max
+
+    def forward(self, x):
+        return np.clip(x, self.x_min, self.x_max)
+
+    def backward(self, dy):
+        (x,) = self.input_variable
+        mask = (x.value >= self.x_min) * (x.value <= self.x_max)
+        dx = dy * mask
+        return dx
+
+
+def clip(x, x_min, x_max):
+    return Clip(x_min, x_max)(x)
+
+
+def softmax_cross_entropy_simple(x, t):
+    x, t = as_variable(x), as_variable(t)
+    N = x.shape[0]  # 一般 x 的第一个维度是批量数据个数 batch size
+    p = softmax_simple(x)
+    p = clip(p, 1e-15, 1.0)  # 防止0和1溢出问题
+    log_p = log(p)
+    tlog_p = log_p[np.arange(N), t.value]
+    return -1 * sum(tlog_p) / N
+
+
+class Softmax(Function):
+    def __init__(self, axis=1):
+        self.axis = axis
+
+    def forward(self, x):
+        # 防止数据溢出，进行缩放
+        x_shift = x - x.max(axis=self.axis, keepdims=True)
+        y = np.exp(x_shift)
+        y /= y.sum(axis=self.axis, keepdims=True)
+        return y
+
+    def backward(self, dy):
+        y = self.output_variable[0]
+        dx = y * dy
+        sum_dx = dx.sum(axis=self.axis, keepdims=True)
+        dx -= y * sum_dx
+        return dx
+
+
+def softmax(x, axis=1):
+    return Softmax(axis)(x)
+
+
+# 使用另一种计算方式。是数学上最稳定的表达形式，避免任何溢出或 underflow。
+def logsumexp(x, axis=1):
+    m = x.max(axis=axis, keepdims=True)
+    y = x - m
+    np.exp(y, out=y)
+    s = y.sum(axis=axis, keepdims=True)
+    np.log(s, out=s)
+    m += s
+    return m
+
+
+class SoftmaxCrossEntropy(Function):
+    def forward(self, x, t):
+        N = x.shape[0]
+        log_z = logsumexp(x, axis=1)
+        log_p = x - log_z
+        log_p = log_p[np.arange(N), t.ravel()]
+        y = -log_p.sum() / np.float32(N)
+        return y
+
+    def backward(self, dy):
+        # 反向传播： dL/dx = (y - one_hot(t)) / N
+        # 拿到保存的值
+        x, t = self.input_variable
+        N, _ = x.shape
+
+        dy *= 1 / N
+        y = softmax(x)
+
+        # 构造 one-hot
+        one_hot = np.zeros_like(y, dtype=np.float32)
+        one_hot[np.arange(N), t.value] = 1
+        # softmax + crossentropy 的合成梯度
+        y = (y - one_hot) * dy
+        # 这个Node是指 t 无需梯度，因为t是标签，不是中间变量。如果没有None的话导致框架后续逻辑不兼容
+        return y, None
+
+
+def softmax_cross_entropy(x, t):
+    return SoftmaxCrossEntropy()(x, t)
 
 
 if __name__ == '__main__':

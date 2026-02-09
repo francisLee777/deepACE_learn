@@ -3,11 +3,13 @@ import os
 import subprocess
 import warnings
 import weakref
-
+import mnist
 from matplotlib import pyplot as plt
 
+mnist.temporary_dir = lambda: './'
+# 默认的数据源url好像失效了，使用下面的url
+mnist.datasets_url = 'https://ossci-datasets.s3.amazonaws.com/mnist/'
 # 将警告转换为错误，便于定位
-warnings.filterwarnings('error')
 import numpy as np
 
 
@@ -860,7 +862,8 @@ class Layer:
                 return any(_contains_param(item) for item in v.values())
             return False
 
-        if name != '_params_name' and hasattr(self, '_params_name') and _contains_param(value):
+        is_container = isinstance(value, (list, tuple, set, dict))  # 防止先创建空集合然后再添加元素的情况
+        if name != '_params_name' and hasattr(self, '_params_name') and (is_container or _contains_param(value)):
             self._params_name.add(name)
         super().__setattr__(name, value)
 
@@ -894,23 +897,47 @@ class Layer:
             if obj is not None:
                 yield from _yield_params(obj)
 
-    def clear_grad(self):
-        for param in self.params():
-            param.clear_grad()
-
     # 打平参数
     def _flatten_params(self, params_dict, parent_key=""):
         for name in self._params_name:
             # __dict__ 是类的属性字典，包含了类的所有属性，包括实例属性和类属性
             obj = self.__dict__[name]
-
             # key 的设计是支持嵌套的，例如：layer1/W 表示 layer1 层的权重参数 W
             key = parent_key + '/' + name if parent_key else name
+
             # 如果是 Layer 类型，递归调用 _flatten_params 方法，最终都将参数加入到 params_dict 中
             if isinstance(obj, Layer):
                 obj._flatten_params(params_dict, key)
-            else:
+            elif isinstance(obj, Parameter):
                 params_dict[key] = obj
+            elif isinstance(obj, (list, tuple, set)):  # 暂不处理 dict 类型
+                for i, item in enumerate(obj):
+                    sub_key = f"{key}/{i}"
+                    if isinstance(item, Layer):
+                        item._flatten_params(params_dict, sub_key)
+                    elif isinstance(item, Parameter):
+                        params_dict[sub_key] = item
+            else:
+                continue
+
+    def save_params(self, file_path="params.npz"):
+        params_dict = {}
+        self._flatten_params(params_dict)
+        # params_dict 中的对象是 Parameter 类型，要转换成 numpy 数组类型
+        for key, param in params_dict.items():
+            params_dict[key] = param.value
+        np.savez_compressed(file_path, **params_dict)
+
+    def load_params(self, file_path="params.npz"):
+        data = np.load(file_path, allow_pickle=True)
+        params_dict = {}
+        self._flatten_params(params_dict)
+        for key, param in params_dict.items():
+            param.value = data[key]
+
+    def clear_grad(self):
+        for param in self.params():
+            param.clear_grad()
 
 
 # 线性层
@@ -1257,23 +1284,44 @@ class DataLoader:
         return self.__next__()
 
 
+class MNISTDataset(Dataset):
+    def prepare(self):
+        if self.is_train:
+            images = mnist.train_images()  # shape: (60000, 28, 28)
+            labels = mnist.train_labels()  # shape: (60000,)
+        else:
+            images = mnist.test_images()  # shape: (10000, 28, 28)
+            labels = mnist.test_labels()  # shape: (10000,)
+
+        # 数据预处理
+        # 转为 float32 并归一化到 [0, 1]
+        images = images.astype(np.float32) / 255.0
+
+        # 拉平成 (N, 784)，方便输入 MLP
+        images = images.reshape(len(images), -1)
+
+        self.data = images
+        self.label = labels
+
+
 #  ———————————————————————    end 数据集和加载器相关    —————————————————————————
 
 if __name__ == '__main__':
-    max_epoch = 50  # 最大训练轮数
-    batch_size = 30  # 每个批次的样本数量
-    hidden_size = 10  # 隐藏层神经元数量
-    lr = 1.0  # 学习率
+    max_epoch = 30  # 最大训练轮数
+    batch_size = 32  # 每个批次的样本数量
+    hidden_size = 32  # 隐藏层神经元数量
+    output_size = 10  # 手写数字识别的最终结果是10分类
+    lr = 0.1  # 学习率
 
     # 使用 DataLoader 进行训练
-    train_set = ThreeClassDataset(is_train=True)
-    test_set = ThreeClassDataset(is_train=False)
+    train_set = MNISTDataset(is_train=True)
+    test_set = MNISTDataset(is_train=False)
 
     train_loader = DataLoader(train_set, batch_size)
     test_loader = DataLoader(test_set, batch_size, shuffle=False)
 
-    model = MultiLayerNet((hidden_size,), 3)
-    optimizer = SGD(model, lr)
+    model = MultiLayerNet((hidden_size, hidden_size), output_size)
+    optimizer = Momentum(model, lr)
 
     # for 数据可视化
     train_loss_list, test_loss_list = [], []
@@ -1338,3 +1386,6 @@ if __name__ == '__main__':
 
     plt.tight_layout()
     plt.show()
+
+    # 保存模型参数
+    model.save_params("model_params.pkl")
