@@ -110,6 +110,22 @@ class Variable:
     def __abs__(self):
         return abs(self)
 
+    def unchain(self):
+        self.creator = None
+
+    def unchain_backward(self):
+        funcs = []
+        if self.creator is not None:
+            funcs = [self.creator]
+            # BPTT 截断：递归地切断当前节点变量到之前所有计算图的连接
+            # 栈消除递归写法，也可以直接递归
+        while len(funcs) != 0:
+            f = funcs.pop()
+            for x in f.input_variable:
+                if x.creator is not None:
+                    funcs.append(x.creator)
+                    x.unchain()
+
     def backward(self, retain_grad=False):
         if self.grad is None:
             self.grad = Variable(np.ones_like(self.value))
@@ -1017,7 +1033,8 @@ class MultiLayerNet(Model):
 
 #  ———————————————————————    start 优化器    —————————————————————————
 class Optimizer:
-    def __init__(self, model):
+    def __init__(self, model, lr=0.01):
+        self.lr = lr
         self.target = model  # 也可以传入 Layer 类
         self.hooks = []  # 钩子函数[可选]
 
@@ -1304,88 +1321,130 @@ class MNISTDataset(Dataset):
         self.label = labels
 
 
+class RNN(Layer):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.x_w = LinearLayer(hidden_size)
+        # 这里不使用偏置的原因是，在 x_w 中已经包括了偏置
+        self.h_prev_w = LinearLayer(hidden_size, need_bias=False)
+        self.h_cur = None  # 当前步骤的隐藏状态，初始为None，每次前向传播后更新
+
+    def forward(self, x):
+        if self.h_cur is None:
+            # 第一个时间步，没有隐藏状态，所以直接使用输入计算隐藏状态
+            h_new = tanh(self.x_w(x))
+        else:
+            h_new = tanh(self.x_w(x) + self.h_prev_w(self.h_cur))
+        self.h_cur = h_new
+        # 输出的维度是 x_batch_size, hidden_size
+        return h_new
+
+    # 用于重置当前步骤的隐含变量
+    def reset_state(self):
+        self.h_cur = None
+
+
+class SimpleRNN(Model):
+    def __init__(self, hidden_size, out_size):
+        super().__init__()
+        self.rnn = RNN(hidden_size)
+        self.fc = LinearLayer(out_size)
+
+    def reset_state(self):
+        self.rnn.reset_state()
+
+    def forward(self, input_x):
+        h = self.rnn(input_x)
+        y = self.fc(h)
+        return y
+
+
 #  ———————————————————————    end 数据集和加载器相关    —————————————————————————
 
-if __name__ == '__main__':
-    max_epoch = 30  # 最大训练轮数
-    batch_size = 32  # 每个批次的样本数量
-    hidden_size = 32  # 隐藏层神经元数量
-    output_size = 10  # 手写数字识别的最终结果是10分类
-    lr = 0.1  # 学习率
+class SinCurve(Dataset):
+    def prepare(self):
+        num_data = 1000
+        dtype = np.float32
+        # 生成 1000个 0 到 2π 之间的等间隔数据点
+        x = np.linspace(0, 2 * np.pi, num_data)
+        # 添加噪声值
+        noise_range = (-0.05, 0.05)
+        noise = np.random.uniform(noise_range[0], noise_range[1], size=x.shape)
+        if self.is_train:
+            y = np.sin(x) + noise  # 加入噪声
+        else:
+            y = np.cos(x)
+        y = y.astype(dtype)
+        self.data = y[:-1][:, np.newaxis]  # x 值是 sin 值的前一个时间步
+        self.label = y[1:][:, np.newaxis]  # t 值是 sin 值的下一个时间步
 
-    # 使用 DataLoader 进行训练
-    train_set = MNISTDataset(is_train=True)
-    test_set = MNISTDataset(is_train=False)
 
-    train_loader = DataLoader(train_set, batch_size)
-    test_loader = DataLoader(test_set, batch_size, shuffle=False)
+class Adam(Optimizer):
+    def __init__(self, model, alpha=0.001, beta1=0.9, beta2=0.999, eps=1e-8):
+        self.t = 1
+        self.alpha = alpha
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.ms = {}
+        self.vs = {}
 
-    model = MultiLayerNet((hidden_size, hidden_size), output_size)
-    optimizer = Momentum(model, lr)
+        fix1 = 1. - math.pow(self.beta1, self.t)
+        fix2 = 1. - math.pow(self.beta2, self.t)
+        lr = self.alpha * math.sqrt(fix2) / fix1
 
-    # for 数据可视化
-    train_loss_list, test_loss_list = [], []
-    train_acc_list, test_acc_list = [], []
+        super().__init__(model, lr)
 
-    for epoch in range(max_epoch):
-        sum_loss, sum_acc = 0, 0
-        # 训练
-        for x, t in train_loader:
-            y = model(x)
-            loss = softmax_cross_entropy(y, t)
+    def update(self, *args, **kwargs):
+        self.t += 1
+        super().update(*args, **kwargs)
+
+    def update_one(self, param):
+        key = id(param)
+        if key not in self.ms:
+            self.ms[key] = np.zeros_like(param.value)
+            self.vs[key] = np.zeros_like(param.value)
+
+        m, v = self.ms[key], self.vs[key]
+        beta1, beta2, eps = self.beta1, self.beta2, self.eps
+        grad = param.grad.value
+
+        m += (1 - beta1) * (grad - m)
+        v += (1 - beta2) * (grad * grad - v)
+        param.value -= self.lr * m / (np.sqrt(v) + eps)
+
+
+# Hyperparameters 超参数，需要人工手动设置
+max_epoch = 100  # 训练轮数。每一轮是一次完整的数据集遍历
+hidden_size = 100
+bptt_length = 30  # 截断反向传播的时间步长。每 bptt_length 个时间步进行一次反向传播更新
+
+train_set = SinCurve(is_train=True)
+seqlen = len(train_set)  # 每次从数据集中取样本的序列长度，这里直接取整个数据集的长度
+
+# 预测数据值，回归任务，所以 output_size 是 1
+model = SimpleRNN(hidden_size, 1)
+optimizer = Adam(model)  # 使用 Adam 效果更好
+
+# Start training.
+for epoch in range(max_epoch):
+    # 每轮训练需要重置 RNN 层的隐藏状态
+    model.reset_state()  # 重置模型，消除训练时的h状态
+    loss, count = np.float32(0), 0
+
+    for x, t in train_set:
+        # x 的形状是 (1, )，需要 reshape 成 (1, 1). 因为 RNN 的入参需要是 2 维的，否则无法做 linear 中的矩阵乘法
+        x = x.reshape(1, 1)
+        y = model(x)
+        loss += mean_squared_error(y, t)  # 数值类型的回归任务，使用均方误差损失函数即可。
+        count += 1
+
+        # 当遍历一个 bptt_length 长度的序列时，需要切断 RNN 层的状态
+        if count % bptt_length == 0 or count == seqlen:
             model.clear_grad()
-            loss.backward()
+            loss.backward(retain_grad=True)
+            loss.unchain_backward()
             optimizer.update()
-            acc = accuracy(y, t)
-            sum_loss += float(loss.value) * len(t)
-            sum_acc += float(acc.value) * len(t)
 
-        print("epoch: {}".format(epoch + 1))
-        print("train loss: {:.4f}, accuracy: {:.4f}".format(sum_loss / len(train_set), sum_acc / len(train_set)))
-
-        # 每一轮训练结束后，使用测试集评估模型性能
-        sum_loss_test, sum_acc_test = 0, 0
-        for x, t in test_loader:
-            y = model(x)
-            loss = softmax_cross_entropy(y, t)
-            acc = accuracy(y, t)
-            sum_loss_test += float(loss.value) * len(t)
-            sum_acc_test += float(acc.value) * len(t)
-
-        print("test loss: {:.4f}, accuracy: {:.4f}".format(sum_loss_test / len(test_set), sum_acc_test / len(test_set)))
-
-        # ======= 保存数据用于可视化 =======
-        train_loss_list.append(sum_loss / len(train_set))
-        test_loss_list.append(sum_loss_test / len(test_set))
-        train_acc_list.append(sum_acc / len(train_set))
-        test_acc_list.append(sum_acc_test / len(test_set))
-
-    # ======= 绘图 =======
-    epochs = range(1, max_epoch + 1)
-    plt.figure(figsize=(12, 5))
-
-    # --- loss 曲线 ---
-    plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_loss_list, label="Train Loss")
-    plt.plot(epochs, test_loss_list, label="Test Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training vs Test Loss")
-    plt.legend()
-    plt.grid(True)
-
-    # --- acc 曲线 ---
-    plt.subplot(1, 2, 2)
-    plt.plot(epochs, train_acc_list, label="Train Accuracy")
-    plt.plot(epochs, test_acc_list, label="Test Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.title("Training vs Test Accuracy")
-    plt.legend()
-    plt.grid(True)
-
-    plt.tight_layout()
-    plt.show()
-
-    # 保存模型参数
-    model.save_params("model_params.pkl")
+    avg_loss = float(loss.value) / count
+    print('| epoch %d | loss %f' % (epoch + 1, avg_loss))
