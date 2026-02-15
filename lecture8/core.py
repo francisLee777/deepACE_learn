@@ -1,16 +1,17 @@
 import math
 import os
 import subprocess
-import warnings
 import weakref
 import mnist
-from matplotlib import pyplot as plt
+import time
 
 mnist.temporary_dir = lambda: './'
 # 默认的数据源url好像失效了，使用下面的url
 mnist.datasets_url = 'https://ossci-datasets.s3.amazonaws.com/mnist/'
 # 将警告转换为错误，便于定位
 import numpy as np
+
+np.random.seed(42)
 
 
 class Variable:
@@ -716,14 +717,13 @@ def linear(input_x, W, b=None):
 
 class MeanSquaredError(Function):
     def forward(self, y0, y1):
-        diff = y1 - y0
         # 注意， sum 函数返回的是 Variable 类型，但在forward 方法中，要返回非Variable类型
-        return sum(diff ** 2).value / len(diff)
+        diff = y0 - y1
+        self.diff = diff
+        return np.mean(diff ** 2)
 
     def backward(self, dy):
-        y0, y1 = self.input_variable
-        diff = y1 - y0
-        dy0 = dy * diff * (2.0 / len(diff))
+        dy0 = dy * self.diff * np.float32(2.0 / self.diff.size)
         dy1 = -dy0
         return dy0, dy1
 
@@ -1370,10 +1370,10 @@ class SinCurve(Dataset):
         # 添加噪声值
         noise_range = (-0.05, 0.05)
         noise = np.random.uniform(noise_range[0], noise_range[1], size=x.shape)
-        if self.is_train:
-            y = np.sin(x) + noise  # 加入噪声
-        else:
-            y = np.cos(x)
+        # if self.is_train:
+        #     y = np.sin(x) + noise  # 加入噪声
+        # else:
+        y = np.cos(x)
         y = y.astype(dtype)
         self.data = y[:-1][:, np.newaxis]  # x 值是 sin 值的前一个时间步
         self.label = y[1:][:, np.newaxis]  # t 值是 sin 值的下一个时间步
@@ -1389,14 +1389,13 @@ class Adam(Optimizer):
         self.ms = {}
         self.vs = {}
 
-        fix1 = 1. - math.pow(self.beta1, self.t)
-        fix2 = 1. - math.pow(self.beta2, self.t)
-        lr = self.alpha * math.sqrt(fix2) / fix1
-
-        super().__init__(model, lr)
+        super().__init__(model)
 
     def update(self, *args, **kwargs):
         self.t += 1
+        fix1 = 1. - math.pow(self.beta1, self.t)
+        fix2 = 1. - math.pow(self.beta2, self.t)
+        self.lr = self.alpha * math.sqrt(fix2) / fix1
         super().update(*args, **kwargs)
 
     def update_one(self, param):
@@ -1414,37 +1413,106 @@ class Adam(Optimizer):
         param.value -= self.lr * m / (np.sqrt(v) + eps)
 
 
-# Hyperparameters 超参数，需要人工手动设置
-max_epoch = 100  # 训练轮数。每一轮是一次完整的数据集遍历
-hidden_size = 100
-bptt_length = 30  # 截断反向传播的时间步长。每 bptt_length 个时间步进行一次反向传播更新
+seq_data = [np.random.randn(1, 16) for _ in range(100)]
+print("seq_data输入数据", seq_data[0])
+
+xs = seq_data[0:-1]
+ts = seq_data[1:]
+model = SimpleRNN(5, 16)
+
+loss, cnt = 0, 0
+for x, t in zip(xs, ts):
+    y = model(x)
+    loss += mean_squared_error(y, t)
+
+    cnt += 1
+    if cnt % 10 == 0:
+        model.clear_grad()
+        loss.backward()
+        # print(f"loss: {loss.value}, cnt: {cnt}")
+
+
+# 正弦曲线  Sin(x)
+class SinCurve(Dataset):
+    def prepare(self):
+        num_data = 1000
+        dtype = np.float32  # 一般情况下，深度学习用 float32
+        # 生成 1000 个 0～2π 的数据点，并且是等距的
+        x = np.linspace(0, 2 * np.pi, num_data)
+        noise_range = (-0.05, 0.05)
+        noise = np.random.uniform(noise_range[0], noise_range[1], size=x.shape)
+        if self.is_train:
+            y = np.sin(x) + noise
+        else:
+            y = np.sin(x)
+        y = y.astype(dtype)
+        self.data = y[:-1][:, np.newaxis]
+        self.label = y[1:][:, np.newaxis]
+
 
 train_set = SinCurve(is_train=True)
-seqlen = len(train_set)  # 每次从数据集中取样本的序列长度，这里直接取整个数据集的长度
+print(train_set[0])  # (x 和 t)   x 和 t 的形状都是 (1, )
 
-# 预测数据值，回归任务，所以 output_size 是 1
+max_epoch = 10
+hidden_size = 100
+bptt_length = 30  # 反向传播截断长度
 model = SimpleRNN(hidden_size, 1)
-optimizer = Adam(model)  # 使用 Adam 效果更好
+optimizer = Adam(model)
 
-# Start training.
 for epoch in range(max_epoch):
-    # 每轮训练需要重置 RNN 层的隐藏状态
-    model.reset_state()  # 重置模型，消除训练时的h状态
-    loss, count = np.float32(0), 0
-
+    model.reset_state()
+    loss, count = 0, 0
+    timeX = time.time()
     for x, t in train_set:
-        # x 的形状是 (1, )，需要 reshape 成 (1, 1). 因为 RNN 的入参需要是 2 维的，否则无法做 linear 中的矩阵乘法
+        # x 和 t 的形状都是 (1, ) 要变成 (1, 1)
         x = x.reshape(1, 1)
         y = model(x)
-        loss += mean_squared_error(y, t)  # 数值类型的回归任务，使用均方误差损失函数即可。
+        loss += mean_squared_error(y, t)
         count += 1
 
-        # 当遍历一个 bptt_length 长度的序列时，需要切断 RNN 层的状态
-        if count % bptt_length == 0 or count == seqlen:
+        if count % bptt_length == 0 or count == len(train_set):
             model.clear_grad()
-            loss.backward(retain_grad=True)
+            loss.backward()
             loss.unchain_backward()
             optimizer.update()
 
-    avg_loss = float(loss.value) / count
-    print('| epoch %d | loss %f' % (epoch + 1, avg_loss))
+    avg_loss = loss / count
+    print("epoch %d avg_loss:%f " % (epoch, avg_loss.value))
+    print("time loss", time.time() - timeX)
+
+# x 整体的输入 [n 批量数, one-hot维度]
+
+# # Hyperparameters 超参数，需要人工手动设置
+# max_epoch = 100  # 训练轮数。每一轮是一次完整的数据集遍历
+# hidden_size = 100
+# bptt_length = 30  # 截断反向传播的时间步长。每 bptt_length 个时间步进行一次反向传播更新
+#
+# train_set = SinCurve(is_train=True)
+# seqlen = len(train_set)  # 每次从数据集中取样本的序列长度，这里直接取整个数据集的长度
+#
+# # 预测数据值，回归任务，所以 output_size 是 1
+# model = SimpleRNN(hidden_size, 1)
+# optimizer = Adam(model)  # 使用 Adam 效果更好
+#
+# # Start training.
+# for epoch in range(max_epoch):
+#     # 每轮训练需要重置 RNN 层的隐藏状态
+#     model.reset_state()  # 重置模型，消除训练时的h状态
+#     loss, count = np.float32(0), 0
+#
+#     for x, t in train_set:
+#         # x 的形状是 (1, )，需要 reshape 成 (1, 1). 因为 RNN 的入参需要是 2 维的，否则无法做 linear 中的矩阵乘法
+#         x = x.reshape(1, 1)
+#         y = model(x)
+#         loss += mean_squared_error(y, t)  # 数值类型的回归任务，使用均方误差损失函数即可。
+#         count += 1
+#
+#         # 当遍历一个 bptt_length 长度的序列时，需要切断 RNN 层的状态
+#         if count % bptt_length == 0 or count == seqlen:
+#             model.clear_grad()
+#             loss.backward(retain_grad=True)
+#             loss.unchain_backward()
+#             optimizer.update()
+#
+#     avg_loss = float(loss.value) / count
+#     print('| epoch %d | loss %f' % (epoch + 1, avg_loss))

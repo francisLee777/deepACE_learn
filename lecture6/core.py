@@ -692,14 +692,13 @@ def linear(input_x, W, b=None):
 
 class MeanSquaredError(Function):
     def forward(self, y0, y1):
-        diff = y1 - y0
         # 注意， sum 函数返回的是 Variable 类型，但在forward 方法中，要返回非Variable类型
-        return sum(diff ** 2).value / len(diff)
+        diff = y0 - y1
+        self.diff = diff
+        return np.mean(diff ** 2)
 
     def backward(self, dy):
-        y0, y1 = self.input_variable
-        diff = y1 - y0
-        dy0 = dy * diff * (2.0 / len(diff))
+        dy0 = dy * self.diff * np.float32(2.0 / self.diff.size)
         dy1 = -dy0
         return dy0, dy1
 
